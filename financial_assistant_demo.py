@@ -1,6 +1,6 @@
 # Financial Assistant with LangChain, LangGraph & LlamaIndex
 # 2-Day Demo Implementation - FIXED VERSION
-
+import streamlit.components.v1 as components
 import os
 import streamlit as st
 from datetime import datetime, timedelta
@@ -151,6 +151,61 @@ class DatabaseManager:
             )
         return None
 
+    def save_portfolio(self, portfolio: Portfolio):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO portfolios VALUES (?, ?, ?, ?)
+        ''', (
+            portfolio.user_id,
+            json.dumps(portfolio.holdings),
+            portfolio.total_value,
+            portfolio.last_updated
+        ))
+        conn.commit()
+        conn.close()
+
+    def get_portfolio(self, user_id: str) -> Optional[Portfolio]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM portfolios WHERE user_id = ?', (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return Portfolio(
+                user_id=row[0],
+                holdings=json.loads(row[1]),
+                total_value=row[2],
+                last_updated=row[3]
+            )
+        return None
+    
+    def save_financial_goals(self, goals: List[FinancialGoal]):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        for goal in goals:
+            cursor.execute('''
+                INSERT OR REPLACE INTO financial_goals VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                goal.goal_id,
+                goal.user_id,
+                goal.goal_type,
+                goal.target_amount,
+                goal.current_amount,
+                goal.deadline,
+                goal.status
+            ))
+        conn.commit()
+        conn.close()
+
+    def get_financial_goals(self, user_id: str) -> List[FinancialGoal]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM financial_goals WHERE user_id = ?', (user_id,))
+        rows = cursor.fetchall()
+        conn.close()
+        return [FinancialGoal(*row) for row in rows]
+
 # ============================================================================
 # 2. FINANCIAL DATA TOOLS (LangChain Tools)
 # ============================================================================
@@ -270,12 +325,24 @@ class PortfolioAnalysisTool(BaseTool):
     def _run(self, user_id: str) -> str:
         try:
             # Get portfolio from database (mock data for demo)
-            portfolio_data = {
-                'RELIANCE.NS': 10,
-                'TCS.NS': 5,
-                'HDFCBANK.NS': 8,
-                'INFY.NS': 12
-            }
+            portfolio = self._db_manager.get_portfolio(user_id)
+            if not portfolio:
+                # Create a default portfolio if none exists (for demo)
+                default_holdings = {
+                    'RELIANCE.NS': 10,
+                    'TCS.NS': 5,
+                    'HDFCBANK.NS': 8,
+                    'INFY.NS': 12
+                }
+                default_portfolio = Portfolio(
+                    user_id=user_id,
+                    holdings=default_holdings,
+                    total_value=0.0,
+                    last_updated=datetime.now()
+                )
+                self._db_manager.save_portfolio(default_portfolio)
+                portfolio = default_portfolio
+            portfolio_data = portfolio.holdings
             
             total_value = 0
             performance_summary = []
@@ -343,11 +410,14 @@ class SIPReminderTool(BaseTool):
     def _run(self, user_id: str) -> str:
         try:
             # Mock SIP data - in real implementation, fetch from database
+            goals = self._db_manager.get_financial_goals(user_id)
             sip_data = [
-                {'fund_name': 'HDFC Top 100 Fund', 'amount': 5000, 'due_date': '15th every month'},
-                {'fund_name': 'SBI Blue Chip Fund', 'amount': 3000, 'due_date': '10th every month'},
-                {'fund_name': 'Axis Long Term Equity Fund', 'amount': 2000, 'due_date': '25th every month'}
+                {'fund_name': goal.goal_type, 'amount': goal.target_amount, 'due_date': goal.deadline.strftime('%dth every month')}
+                for goal in goals if goal.goal_type == 'SIP'
             ]
+            if not sip_data:
+                return "No SIP goals set up. Consider adding some!"
+            # Rest of the code remains the same
             
             today = datetime.now()
             reminders = []
@@ -434,8 +504,9 @@ class FinancialWorkflowGraph:
         
         response = self.llm.invoke(intent_prompt)
         intent = response.content.strip().lower()
-        
-        # FIXED: Return updated state dict
+        valid_intents = ["stock_lookup", "portfolio_analysis", "sip_reminder", "general_advice", "goal_tracking"]
+        if intent not in valid_intents:
+            intent = "general_advice"
         return {
             **state,
             "current_task": intent,
@@ -476,19 +547,34 @@ class FinancialWorkflowGraph:
         
         try:
             if intent == "stock_lookup":
-                # Extract stock symbol from message
+                # Define valid stock symbols from symbol_mapping
+                symbol_mapping = {
+                    'RELIANCE': 'RELIANCE.NS', 'TCS': 'TCS.NS', 'HDFC': 'HDFCBANK.NS',
+                    'HDFCBANK': 'HDFCBANK.NS', 'INFY': 'INFY.NS', 'INFOSYS': 'INFY.NS',
+                    'ICICIBANK': 'ICICIBANK.NS', 'ICICI': 'ICICIBANK.NS', 'SBIN': 'SBIN.NS',
+                    'SBI': 'SBIN.NS', 'ITC': 'ITC.NS', 'WIPRO': 'WIPRO.NS', 'LT': 'LT.NS',
+                    'LARSEN': 'LT.NS', 'HCLTECH': 'HCLTECH.NS', 'HCL': 'HCLTECH.NS',
+                    'BAJFINANCE': 'BAJFINANCE.NS', 'BAJAJ': 'BAJFINANCE.NS', 
+                    'MARUTI': 'MARUTI.NS', 'ASIANPAINT': 'ASIANPAINT.NS', 'ASIAN': 'ASIANPAINT.NS'
+                }
                 words = last_message.upper().split()
                 symbol = None
+                # Prioritize symbols in mapping or valid ticker format
                 for word in words:
-                    if len(word) <= 10 and (word.isalpha() or '.' in word):
+                    if word in symbol_mapping or word.endswith(('.NS', '.BO')) or (len(word) <= 10 and word.isalpha()):
                         symbol = word
                         break
-                
+                if not symbol:
+                    # Fallback: Look for any word that could be a ticker
+                    for word in words:
+                        if len(word) <= 10 and (word.isalpha() or '.' in word):
+                            symbol = word
+                            break
                 if symbol:
                     result = self.tools["stock_price_lookup"]._run(symbol)
                     tool_results["stock_data"] = result
                 else:
-                    tool_results["stock_data"] = "Please specify a stock symbol."
+                    tool_results["stock_data"] = "Please specify a valid stock symbol (e.g., RELIANCE, TCS)."
                     
             elif intent == "portfolio_analysis":
                 result = self.tools["portfolio_analysis"]._run(state["user_id"])
@@ -504,7 +590,6 @@ class FinancialWorkflowGraph:
         except Exception as e:
             tool_results["error"] = f"Error executing task: {str(e)}"
         
-        # FIXED: Return updated state dict
         return {
             **state,
             "tool_results": {**state["tool_results"], **tool_results}
@@ -524,13 +609,11 @@ class FinancialWorkflowGraph:
         
         Tool Results: {json.dumps(tool_results, indent=2)}
         
-        Provide a helpful, personalized response. Include actionable advice when appropriate.
-        Keep it conversational and under 200 words.
+        For portfolio analysis, include the full tool output (stock details, total value, performance) before adding advice. For other queries, provide a concise, conversational response. Keep it under 200 words.
         """
         
         response = self.llm.invoke(response_prompt)
         
-        # FIXED: Return updated state dict
         return {
             **state,
             "final_response": response.content
@@ -583,6 +666,7 @@ class LlamaIndexMemoryManager:
     
     def add_interaction(self, user_id: str, user_message: str, assistant_response: str):
         """Add a user interaction to long-term memory"""
+        self.cleanup_old_interactions(user_id)
         interaction_doc = Document(
             text=f"User: {user_message}\nAssistant: {assistant_response}",
             metadata={
@@ -624,13 +708,28 @@ class LlamaIndexMemoryManager:
         except:
             return "No previous context available."
 
+    def cleanup_old_interactions(self, user_id: str, days_threshold: int = 30):
+        cutoff_date = (datetime.now() - timedelta(days=days_threshold)).isoformat()
+        try:
+            documents = self.chroma_collection.get(where={"user_id": user_id})
+            for doc_id, metadata in zip(documents.get("ids", []), documents.get("metadatas", [])):
+                if metadata and metadata.get("timestamp", "") < cutoff_date:
+                    self.chroma_collection.delete(ids=[doc_id])
+        except Exception as e:
+            print(f"Cleanup error: {str(e)}")  # Silent fail for demo
+
 # ============================================================================
 # 5. MAIN FINANCIAL ASSISTANT CLASS
 # ============================================================================
 
 class FinancialAssistant:
-    def __init__(self, openai_api_key: str):
+    def __init__(self):
         # Initialize core components
+        openai_api_key = os.getenv('OPENAI_API_KEY')
+
+        if not openai_api_key:
+            raise ValueError("OPENAI_API_KEY not found in .env file")
+
         self.db_manager = DatabaseManager()
         self.memory_manager = LlamaIndexMemoryManager(openai_api_key=openai_api_key)
         
@@ -695,6 +794,35 @@ class FinancialAssistant:
 # ============================================================================
 # 6. STREAMLIT DEMO INTERFACE
 # ============================================================================
+def display_portfolio_chart(holdings, values):
+    chart_config = {
+        "type": "bar",
+        "data": {
+            "labels": list(holdings.keys()),
+            "datasets": [{
+                "label": "Portfolio Holdings Value (₹)",
+                "data": values,
+                "backgroundColor": ["#4CAF50", "#2196F3", "#FFC107", "#FF5722"],
+                "borderColor": ["#388E3C", "#1976D2", "#FFA000", "#D81B60"],
+                "borderWidth": 1
+            }]
+        },
+        "options": {
+            "scales": {
+                "y": {"beginAtZero": True, "title": {"display": True, "text": "Value (₹)"}},
+                "x": {"title": {"display": True, "text": "Stocks"}}
+            },
+            "plugins": {"title": {"display": True, "text": "Portfolio Holdings"}}
+        }
+    }
+    components.html(f"""
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <canvas id="portfolioChart" width="400" height="200"></canvas>
+        <script>
+            const ctx = document.getElementById('portfolioChart').getContext('2d');
+            new Chart(ctx, {json.dumps(chart_config)});
+        </script>
+    """, height=300)
 
 def main():
     st.set_page_config(
@@ -708,12 +836,6 @@ def main():
     # Sidebar for configuration
     with st.sidebar:
         st.header("⚙️ Configuration")
-        
-        openai_key = st.text_input(
-            "OpenAI API Key", 
-            type="password",
-            help="Enter your OpenAI API key"
-        )
         
         user_id = st.text_input(
             "User ID",
@@ -736,15 +858,15 @@ def main():
         st.markdown("- Long-term memory")
         st.markdown("- Multi-step workflows")
     
-    # Main interface
-    if not openai_key:
-        st.warning("⚠️ Please enter your OpenAI API key in the sidebar to continue.")
-        return
+    # # Main interface
+    # if not openai_key:
+    #     st.warning("⚠️ Please enter your OpenAI API key in the sidebar to continue.")
+    #     return
     
     # Initialize assistant
     if 'assistant' not in st.session_state:
         try:
-            st.session_state.assistant = FinancialAssistant(openai_key)
+            st.session_state.assistant = FinancialAssistant()
             st.success("✅ Financial Assistant ready!")
         except Exception as e:
             st.error(f"❌ Error initializing assistant: {str(e)}")
@@ -759,6 +881,7 @@ def main():
         with st.chat_message(message["role"]):
             st.write(message["content"])
     
+    # User input
     # User input
     if prompt := st.chat_input("Ask me about stocks, portfolio, SIPs, or financial advice..."):
         # Add user message
@@ -775,12 +898,35 @@ def main():
                         st.session_state.assistant.process_message(user_id, prompt)
                     )
                     st.write(response)
+                    # Check if response is portfolio-related (case-insensitive)
+                    if "portfolio" in response.lower():
+                        portfolio = st.session_state.assistant.db_manager.get_portfolio(user_id)
+                        if portfolio:
+                            values = []
+                            valid_holdings = {}
+                            for symbol, quantity in portfolio.holdings.items():
+                                try:
+                                    stock = yf.Ticker(symbol)
+                                    hist = stock.history(period="1d")
+                                    if not hist.empty:
+                                        value = hist['Close'].iloc[-1] * quantity
+                                        values.append(value)
+                                        valid_holdings[symbol] = quantity
+                                    else:
+                                        values.append(0.0)  # Fallback
+                                        st.warning(f"No data for {symbol}")
+                                except Exception as e:
+                                    values.append(0.0)
+                                    st.warning(f"Error fetching data for {symbol}: {str(e)}")
+                            if any(v > 0 for v in values):
+                                display_portfolio_chart(valid_holdings, values)
+                            else:
+                                st.error("No valid stock data available for chart.")
                     st.session_state.messages.append({"role": "assistant", "content": response})
                 except Exception as e:
                     error_msg = f"Error: {str(e)}"
                     st.error(error_msg)
                     st.session_state.messages.append({"role": "assistant", "content": error_msg})
-    
     # Example queries section
     st.markdown("---")
     st.markdown("### 💡 Try These Examples:")
@@ -805,94 +951,7 @@ def main():
             st.session_state.messages.append({"role": "user", "content": example_query})
             st.rerun()
     
-    # Technical details expander
-    with st.expander("🔍 Technical Implementation Details"):
-        st.markdown("""
-        ### Architecture Overview:
-        
-        1. **LangChain Integration**:
-           - Custom tools for financial data (StockPriceTool, PortfolioAnalysisTool, SIPReminderTool)
-           - Agent-based architecture with memory management
-           - Structured prompts for consistent responses
-        
-        2. **LangGraph Workflow**:
-           - Multi-step workflow: Intent Classification → Context Fetching → Task Execution → Response Generation
-           - State management across workflow nodes
-           - Error handling and recovery mechanisms
-        
-        3. **LlamaIndex Memory**:
-           - Vector-based storage using ChromaDB
-           - Persistent conversation memory across sessions
-           - Context-aware query processing
-        
-        4. **Data Integration**:
-           - Real-time stock data via yFinance API
-           - SQLite for structured data storage
-           - JSON serialization for complex data types
-        
-        5. **Demo Capabilities**:
-           - Multi-turn conversations with context retention
-           - Personalized responses based on user profiles
-           - Real financial data integration
-           - Scalable architecture for production deployment
-        """)
 
 if __name__ == "__main__":
     main()
 
-# ============================================================================
-# 7. UPDATED REQUIREMENTS.TXT
-# ============================================================================
-
-# Requirements for the demo - UPDATED:
-"""
-streamlit>=1.28.0
-langchain>=0.1.0
-langchain-openai>=0.1.0
-langgraph>=0.0.40
-llama-index>=0.8.0
-llama-index-vector-stores-chroma>=0.1.0
-llama-index-embeddings-openai>=0.1.0
-openai>=1.0.0
-yfinance>=0.2.0
-pandas>=1.5.0
-chromadb>=0.4.0
-python-dateutil
-"""
-
-# ============================================================================
-# 8. SETUP INSTRUCTIONS FOR 2-DAY DEMO
-# ============================================================================
-
-"""
-INSTALLATION & SETUP:
-
-1. Install the updated requirements:
-   pip install streamlit langchain langchain-openai langgraph llama-index llama-index-vector-stores-chroma llama-index-embeddings-openai openai yfinance pandas chromadb python-dateutil
-
-2. Run the demo:
-   streamlit run financial_assistant_demo.py
-
-3. Enter your OpenAI API key in the sidebar
-
-KEY FIXES APPLIED:
-
-✅ Updated ChatOpenAI import from langchain-openai package
-✅ Updated LLM invocation methods (predict → invoke)
-✅ Fixed tool name consistency (sip_reminder_check)
-✅ Passed OpenAI API key to LlamaIndex memory manager
-✅ Updated requirements with correct package versions
-✅ Maintained all original functionality
-
-DAY 1 DEMO FEATURES:
-- Real-time stock price lookup
-- Portfolio analysis with mock data
-- SIP reminder system
-- Multi-step LangGraph workflows
-
-DAY 2 ENHANCEMENTS:
-- Persistent memory across sessions
-- Personalized financial recommendations
-- Advanced context management
-- User preference learning
-"""
