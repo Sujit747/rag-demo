@@ -35,6 +35,12 @@ from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.embeddings.openai import OpenAIEmbedding
 import chromadb
+from langchain_core.tools import BaseTool
+from datetime import datetime
+import yfinance as yf
+import logging
+from typing import Optional
+
 
 # ============================================================================
 # 1. DATA MODELS & STORAGE
@@ -442,6 +448,126 @@ class SIPReminderTool(BaseTool):
     async def _arun(self, user_id: str) -> str:
         return self._run(user_id)
 
+
+
+class AddPortfolioSharesTool(BaseTool):
+    name: str = "add_portfolio_shares"
+    description: str = "Add shares to user's portfolio"
+    
+    _db_manager: Optional[DatabaseManager] = None
+    
+    @classmethod
+    def set_db_manager(cls, db_manager: DatabaseManager):
+        cls._db_manager = db_manager
+    
+    def _run(self, user_id: str, symbol: str, quantity: float) -> str:
+        logging.basicConfig(level=logging.DEBUG)
+        logger = logging.getLogger(__name__)
+        
+        try:
+            logger.debug(f"AddPortfolioSharesTool: user_id={user_id}, symbol={symbol}, quantity={quantity}")
+            # Define symbol mapping at method level
+            symbol_mapping = {
+                'RELIANCE': 'RELIANCE.NS', 'TCS': 'TCS.NS', 'HDFC': 'HDFCBANK.NS',
+                'HDFCBANK': 'HDFCBANK.NS', 'INFY': 'INFY.NS', 'INFOSYS': 'INFY.NS',
+                'ICICIBANK': 'ICICIBANK.NS', 'ICICI': 'ICICIBANK.NS', 'SBIN': 'SBIN.NS',
+                'SBI': 'SBIN.NS', 'ITC': 'ITC.NS', 'WIPRO': 'WIPRO.NS', 'LT': 'LT.NS',
+                'LARSEN': 'LT.NS', 'HCLTECH': 'HCLTECH.NS', 'HCL': 'HCLTECH.NS',
+                'BAJFINANCE': 'BAJFINANCE.NS', 'BAJAJ': 'BAJFINANCE.NS',
+                'MARUTI': 'MARUTI.NS', 'ASIANPAINT': 'ASIANPAINT.NS', 'ASIAN': 'ASIANPAINT.NS'
+            }
+            # Clean and normalize symbol
+            symbol = symbol.upper().strip()
+            logger.debug(f"Original symbol: {symbol}")
+            if symbol in symbol_mapping:
+                symbol = symbol_mapping[symbol]
+            elif not symbol.endswith(('.NS', '.BO')):
+                symbol = symbol + '.NS'
+            logger.debug(f"Normalized symbol: {symbol}")
+            
+            # Verify stock data
+            stock = yf.Ticker(symbol)
+            hist = stock.history(period="1d")
+            logger.debug(f"yfinance history for {symbol}: {'non-empty' if not hist.empty else 'empty'}")
+            if hist.empty:
+                # Retry without .NS for international stocks
+                if symbol.endswith('.NS'):
+                    symbol = symbol.replace('.NS', '')
+                    stock = yf.Ticker(symbol)
+                    hist = stock.history(period="1d")
+                    logger.debug(f"Retried yfinance history for {symbol}: {'non-empty' if not hist.empty else 'empty'}")
+                if hist.empty:
+                    return f"❌ Invalid stock symbol: {symbol}. Try RELIANCE, TCS, etc."
+            
+            # Get or create portfolio
+            portfolio = self._db_manager.get_portfolio(user_id)
+            logger.debug(f"Portfolio retrieved: {portfolio}")
+            if not portfolio:
+                portfolio = Portfolio(
+                    user_id=user_id,
+                    holdings={},
+                    total_value=0.0,
+                    last_updated=datetime.now()
+                )
+                logger.debug("Created new portfolio")
+            
+            # Update holdings
+            portfolio.holdings[symbol] = portfolio.holdings.get(symbol, 0) + quantity
+            current_price = hist['Close'].iloc[-1]
+            portfolio.total_value = sum(
+                yf.Ticker(s).history(period="1d")['Close'].iloc[-1] * q
+                for s, q in portfolio.holdings.items()
+                if not yf.Ticker(s).history(period="1d").empty
+            )
+            portfolio.last_updated = datetime.now()
+            logger.debug(f"Updated holdings: {portfolio.holdings}, total_value: {portfolio.total_value}")
+            self._db_manager.save_portfolio(portfolio)
+            logger.debug("Portfolio saved to DB")
+            
+            return f"✅ Added {quantity} shares of {symbol} to your portfolio. Current value: ₹{portfolio.total_value:.2f}"
+        except Exception as e:
+            logger.error(f"Error in AddPortfolioSharesTool: {str(e)}", exc_info=True)
+            return f"❌ Error adding shares: {str(e)}. Please check the symbol or try again later."
+    
+    async def _arun(self, user_id: str, symbol: str, quantity: float) -> str:
+        return self._run(user_id, symbol, quantity)
+
+class SetSIPReminderTool(BaseTool):
+    name: str = "set_sip_reminder"
+    description: str = "Set a new SIP reminder for the user"
+    
+    _db_manager: Optional[DatabaseManager] = None
+    
+    @classmethod
+    def set_db_manager(cls, db_manager: DatabaseManager):
+        cls._db_manager = db_manager
+    
+    def _run(self, user_id: str, fund_name: str, amount: float, due_day: int) -> str:
+        try:
+            if not (1 <= due_day <= 31):
+                return "❌ Due day must be between 1 and 31."
+            if amount <= 0:
+                return "❌ Amount must be positive."
+            
+            # Create a unique goal_id
+            goal_id = f"{user_id}_sip_{fund_name}_{datetime.now().isoformat()}"
+            goal = FinancialGoal(
+                goal_id=goal_id,
+                user_id=user_id,
+                goal_type="SIP",
+                target_amount=amount,
+                current_amount=0.0,
+                deadline=datetime.now().replace(day=due_day),
+                status="Active"
+            )
+            self._db_manager.save_financial_goals([goal])
+            return f"✅ Set SIP reminder: ₹{amount} for {fund_name} on day {due_day} of each month."
+        except Exception as e:
+            return f"❌ Error setting SIP reminder: {str(e)}"
+    
+    async def _arun(self, user_id: str, fund_name: str, amount: float, due_day: int) -> str:
+        return self._run(user_id, fund_name, amount, due_day)
+
 # ============================================================================
 # 3. LANGGRAPH WORKFLOW STATE & NODES
 # ============================================================================
@@ -460,51 +586,39 @@ class FinancialWorkflowGraph:
         self.llm = llm
         self.db_manager = db_manager
         self.tool_node = ToolNode(tools)
-        
-        # Create the workflow graph
         self.workflow = StateGraph(AgentState)
         self._build_graph()
     
     def _build_graph(self):
-        # Add nodes
         self.workflow.add_node("classify_intent", self.classify_intent)
         self.workflow.add_node("fetch_user_context", self.fetch_user_context)
         self.workflow.add_node("execute_financial_task", self.execute_financial_task)
         self.workflow.add_node("generate_response", self.generate_response)
         self.workflow.add_node("update_memory", self.update_memory)
-        
-        # Add edges (workflow flow)
         self.workflow.add_edge("classify_intent", "fetch_user_context")
         self.workflow.add_edge("fetch_user_context", "execute_financial_task")
         self.workflow.add_edge("execute_financial_task", "generate_response")
         self.workflow.add_edge("generate_response", "update_memory")
-        
-        # Set entry point
         self.workflow.set_entry_point("classify_intent")
-        
-        # Compile the graph
         self.app = self.workflow.compile()
     
     def classify_intent(self, state: AgentState) -> AgentState:
-        """Classify user intent - what financial task they want to perform"""
         last_message = state["messages"][-1] if state["messages"] else ""
-        
         intent_prompt = f"""
         Classify the user's financial intent from this message: "{last_message}"
-        
         Possible intents:
         1. stock_lookup - User wants stock price or info
         2. portfolio_analysis - User wants portfolio review
         3. sip_reminder - User wants SIP reminders
-        4. general_advice - General financial advice
-        5. goal_tracking - Track financial goals
-        
+        4. add_portfolio_shares - User wants to add shares to portfolio
+        5. set_sip_reminder - User wants to set a new SIP reminder
+        6. general_advice - General financial advice
+        7. goal_tracking - Track financial goals
         Return only the intent name.
         """
-        
         response = self.llm.invoke(intent_prompt)
         intent = response.content.strip().lower()
-        valid_intents = ["stock_lookup", "portfolio_analysis", "sip_reminder", "general_advice", "goal_tracking"]
+        valid_intents = ["stock_lookup", "portfolio_analysis", "sip_reminder", "add_portfolio_shares", "set_sip_reminder", "general_advice", "goal_tracking"]
         if intent not in valid_intents:
             intent = "general_advice"
         return {
@@ -514,13 +628,10 @@ class FinancialWorkflowGraph:
         }
     
     def fetch_user_context(self, state: AgentState) -> AgentState:
-        """Fetch user profile and context from memory"""
         profile = self.db_manager.get_user_profile(state["user_id"])
-        
         if profile:
             user_profile = asdict(profile)
         else:
-            # Create default profile for demo
             default_profile = UserProfile(
                 user_id=state["user_id"],
                 risk_tolerance="Moderate",
@@ -532,61 +643,112 @@ class FinancialWorkflowGraph:
             )
             self.db_manager.save_user_profile(default_profile)
             user_profile = asdict(default_profile)
-        
-        # FIXED: Return updated state dict
         return {
             **state,
             "context": {**state["context"], "user_profile": user_profile}
         }
     
     def execute_financial_task(self, state: AgentState) -> AgentState:
-        """Execute the appropriate financial task based on intent"""
         intent = state["current_task"]
         last_message = state["messages"][-1] if state["messages"] else ""
         tool_results = {}
-        
         try:
             if intent == "stock_lookup":
-                # Define valid stock symbols from symbol_mapping
                 symbol_mapping = {
                     'RELIANCE': 'RELIANCE.NS', 'TCS': 'TCS.NS', 'HDFC': 'HDFCBANK.NS',
                     'HDFCBANK': 'HDFCBANK.NS', 'INFY': 'INFY.NS', 'INFOSYS': 'INFY.NS',
                     'ICICIBANK': 'ICICIBANK.NS', 'ICICI': 'ICICIBANK.NS', 'SBIN': 'SBIN.NS',
                     'SBI': 'SBIN.NS', 'ITC': 'ITC.NS', 'WIPRO': 'WIPRO.NS', 'LT': 'LT.NS',
                     'LARSEN': 'LT.NS', 'HCLTECH': 'HCLTECH.NS', 'HCL': 'HCLTECH.NS',
-                    'BAJFINANCE': 'BAJFINANCE.NS', 'BAJAJ': 'BAJFINANCE.NS', 
+                    'BAJFINANCE': 'BAJFINANCE.NS', 'BAJAJ': 'BAJFINANCE.NS',
                     'MARUTI': 'MARUTI.NS', 'ASIANPAINT': 'ASIANPAINT.NS', 'ASIAN': 'ASIANPAINT.NS'
                 }
-                words = last_message.upper().split()
-                symbol = None
-                # Prioritize symbols in mapping or valid ticker format
+                # Clean and collect candidate words
+                words = [''.join(c for c in word if c.isalnum()).upper() for word in last_message.split()]
+                candidates = []
                 for word in words:
                     if word in symbol_mapping or word.endswith(('.NS', '.BO')) or (len(word) <= 10 and word.isalpha()):
+                        candidates.append(word)
+                
+                # Prioritize: mapping > .NS/.BO > last alpha word
+                symbol = None
+                for word in candidates:
+                    if word in symbol_mapping:
                         symbol = word
                         break
-                if not symbol:
-                    # Fallback: Look for any word that could be a ticker
-                    for word in words:
-                        if len(word) <= 10 and (word.isalpha() or '.' in word):
-                            symbol = word
-                            break
+                    elif word.endswith(('.NS', '.BO')):
+                        symbol = word
+                        break
+                if not symbol and candidates:
+                    symbol = candidates[-1]  # Take last candidate as fallback
+                
                 if symbol:
                     result = self.tools["stock_price_lookup"]._run(symbol)
                     tool_results["stock_data"] = result
                 else:
                     tool_results["stock_data"] = "Please specify a valid stock symbol (e.g., RELIANCE, TCS)."
-                    
+            
             elif intent == "portfolio_analysis":
                 result = self.tools["portfolio_analysis"]._run(state["user_id"])
                 tool_results["portfolio_analysis"] = result
-                
+            
             elif intent == "sip_reminder":
                 result = self.tools["sip_reminder_check"]._run(state["user_id"])
                 tool_results["sip_reminders"] = result
+            
+            elif intent == "add_portfolio_shares":
+                # Clean and collect candidate words
+                words = [''.join(c for c in word if c.isalnum()).upper() for word in last_message.split()]
+                symbol = None
+                quantity = None
+                candidates = []
+                for word in words:
+                    if word in symbol_mapping or word.endswith(('.NS', '.BO')) or (len(word) <= 10 and word.isalpha()):
+                        candidates.append(word)
+                    try:
+                        qty = float(word)
+                        if qty > 0:
+                            quantity = qty
+                    except:
+                        pass
                 
+                # Prioritize symbol: mapping > .NS/.BO > last alpha word
+                for word in candidates:
+                    if word in symbol_mapping:
+                        symbol = word
+                        break
+                    elif word.endswith(('.NS', '.BO')):
+                        symbol = word
+                        break
+                if not symbol and candidates:
+                    symbol = candidates[-1]
+                
+                if symbol and quantity:
+                    result = self.tools["add_portfolio_shares"]._run(state["user_id"], symbol, quantity)
+                    tool_results["add_shares"] = result
+                else:
+                    tool_results["add_shares"] = "Please specify a valid stock symbol and quantity (e.g., 'Add 10 RELIANCE shares')."
+            
+            elif intent == "set_sip_reminder":
+                # Existing logic is robust; keep unchanged
+                import re
+                amount_match = re.search(r'₹?\s*(\d+\.?\d*)', last_message)
+                day_match = re.search(r'(\d{1,2})(?:th|st|nd|rd)', last_message)
+                fund_name = None
+                for word in last_message.split():
+                    if word.upper() not in ['SET', 'SIP', 'FOR', 'ON', 'REMINDER'] and not word.isdigit() and not word.startswith('₹'):
+                        fund_name = word if not fund_name else f"{fund_name} {word}"
+                amount = float(amount_match.group(1)) if amount_match else None
+                due_day = int(day_match.group(1)) if day_match else None
+                if fund_name and amount and due_day:
+                    result = self.tools["set_sip_reminder"]._run(state["user_id"], fund_name, amount, due_day)
+                    tool_results["set_sip"] = result
+                else:
+                    tool_results["set_sip"] = "Please specify fund name, amount, and due day (e.g., 'Set ₹5000 SIP for HDFC Fund on 15th')."
+            
             else:
-                tool_results["general"] = "I can help with stock lookups, portfolio analysis, and SIP reminders. What would you like to know?"
-                
+                tool_results["general"] = "I can help with stock lookups, portfolio analysis, SIP reminders, adding shares, or setting SIPs. What would you like to do?"
+        
         except Exception as e:
             tool_results["error"] = f"Error executing task: {str(e)}"
         
@@ -596,38 +758,27 @@ class FinancialWorkflowGraph:
         }
     
     def generate_response(self, state: AgentState) -> AgentState:
-        """Generate final response using LLM with context"""
         user_profile = state["context"].get("user_profile", {})
         tool_results = state["tool_results"]
         last_message = state["messages"][-1] if state["messages"] else ""
-        
         response_prompt = f"""
         You are a helpful financial assistant. Generate a personalized response based on:
-        
         User Message: "{last_message}"
         User Profile: Risk Tolerance: {user_profile.get('risk_tolerance', 'Unknown')}, Goals: {user_profile.get('investment_goals', [])}
-        
         Tool Results: {json.dumps(tool_results, indent=2)}
-        
-        For portfolio analysis, include the full tool output (stock details, total value, performance) before adding advice. For other queries, provide a concise, conversational response. Keep it under 200 words.
+        For portfolio analysis or adding shares, include the full tool output before adding advice. For SIPs, confirm the action or list reminders. Keep it conversational and under 200 words.
         """
-        
         response = self.llm.invoke(response_prompt)
-        
         return {
             **state,
             "final_response": response.content
         }
     
     def update_memory(self, state: AgentState) -> AgentState:
-        """Update user interaction memory"""
-        # Update last interaction time
         profile = self.db_manager.get_user_profile(state["user_id"])
         if profile:
             profile.last_interaction = datetime.now()
             self.db_manager.save_user_profile(profile)
-        
-        # FIXED: Return state dict unchanged
         return state
 
 
@@ -724,16 +875,12 @@ class LlamaIndexMemoryManager:
 
 class FinancialAssistant:
     def __init__(self):
-        # Initialize core components
         openai_api_key = os.getenv('OPENAI_API_KEY')
-
         if not openai_api_key:
             raise ValueError("OPENAI_API_KEY not found in .env file")
-
+        
         self.db_manager = DatabaseManager()
         self.memory_manager = LlamaIndexMemoryManager(openai_api_key=openai_api_key)
-        
-        # Initialize LLM
         self.llm = ChatOpenAI(
             temperature=0.7,
             model="gpt-3.5-turbo",
@@ -743,24 +890,25 @@ class FinancialAssistant:
         # Initialize tools
         portfolio_tool = PortfolioAnalysisTool()
         PortfolioAnalysisTool.set_db_manager(self.db_manager)
-        
         sip_tool = SIPReminderTool()
         SIPReminderTool.set_db_manager(self.db_manager)
+        add_shares_tool = AddPortfolioSharesTool()
+        AddPortfolioSharesTool.set_db_manager(self.db_manager)
+        set_sip_tool = SetSIPReminderTool()
+        SetSIPReminderTool.set_db_manager(self.db_manager)
         
         self.tools = [
             StockPriceTool(),
             portfolio_tool,
-            sip_tool
+            sip_tool,
+            add_shares_tool,
+            set_sip_tool
         ]
         
-        # Initialize LangGraph workflow
         self.workflow_graph = FinancialWorkflowGraph(self.tools, self.llm, self.db_manager)
-        
         print("✅ Financial Assistant initialized with LangChain + LangGraph + LlamaIndex")
     
     async def process_message(self, user_id: str, message: str) -> str:
-        """Process user message through the complete workflow"""
-        # FIXED: Create initial state as dict
         initial_state = {
             "messages": [message],
             "user_id": user_id,
@@ -769,26 +917,17 @@ class FinancialAssistant:
             "tool_results": {},
             "final_response": ""
         }
-        
         try:
-            # Run through LangGraph workflow
             final_state = await self.workflow_graph.app.ainvoke(initial_state)
-            
-            # Get response
             response = final_state["final_response"]
-            
-            # Update LlamaIndex memory
             self.memory_manager.add_interaction(user_id, message, response)
-            
             return response
-            
         except Exception as e:
             error_response = f"I encountered an error: {str(e)}. Please try again."
             self.memory_manager.add_interaction(user_id, message, error_response)
             return error_response
     
     def get_user_insights(self, user_id: str) -> str:
-        """Get insights about user from memory"""
         return self.memory_manager.get_user_context(user_id)
 
 # ============================================================================
@@ -825,83 +964,87 @@ def display_portfolio_chart(holdings, values):
     """, height=300)
 
 def main():
+    # Configure logging
+    import logging
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),  # Output to terminal
+            logging.FileHandler('financial_assistant.log')  # Save to file
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    
     st.set_page_config(
         page_title="Financial Assistant Demo",
         page_icon="💰",
         layout="wide"
     )
-    
     st.title("🤖 Financial Assistant Demo")
-    st.subheader("Powered by LangChain + LangGraph + LlamaIndex")    
-    # Sidebar for configuration
+    st.subheader("Powered by LangChain + LangGraph + LlamaIndex")
+    
     with st.sidebar:
         st.header("⚙️ Configuration")
-        
         user_id = st.text_input(
             "User ID",
             value="demo_user_123",
             help="Unique identifier for user sessions"
         )
-        
         st.markdown("---")
         st.markdown("### 🔧 Framework Stack")
         st.markdown("- **LangChain**: Agent & tool orchestration")
         st.markdown("- **LangGraph**: Multi-step workflow management")
         st.markdown("- **LlamaIndex**: Context & memory management")
         st.markdown("- **yFinance**: Real financial data")
-        
         st.markdown("---")
         st.markdown("### 🎯 Demo Features")
         st.markdown("- Stock price lookup")
         st.markdown("- Portfolio analysis")
         st.markdown("- SIP reminders")
+        st.markdown("- Add portfolio shares")
+        st.markdown("- Set SIP reminders")
         st.markdown("- Long-term memory")
-        st.markdown("- Multi-step workflows")
+        st.markdown("---")
+        st.markdown("### 📜 Debug Log")
+        if os.path.exists('financial_assistant.log'):
+            with open('financial_assistant.log', 'r') as f:
+                st.text_area("Recent Logs", f.read(), height=200)
     
-    # # Main interface
-    # if not openai_key:
-    #     st.warning("⚠️ Please enter your OpenAI API key in the sidebar to continue.")
-    #     return
-    
-    # Initialize assistant
     if 'assistant' not in st.session_state:
         try:
+            logger.info("Initializing Financial Assistant")
             st.session_state.assistant = FinancialAssistant()
             st.success("✅ Financial Assistant ready!")
         except Exception as e:
+            logger.error(f"Error initializing assistant: {str(e)}", exc_info=True)
             st.error(f"❌ Error initializing assistant: {str(e)}")
             return
     
-    # Chat interface
     if 'messages' not in st.session_state:
         st.session_state.messages = []
     
-    # Display chat history
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.write(message["content"])
     
-    # User input
-    # User input
     if prompt := st.chat_input("Ask me about stocks, portfolio, SIPs, or financial advice..."):
-        # Add user message
+        logger.info(f"Processing user prompt: {prompt}")
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.write(prompt)
-        
-        # Get assistant response
         with st.chat_message("assistant"):
             with st.spinner("Processing your request..."):
                 try:
-                    # Process through async workflow
                     response = asyncio.run(
                         st.session_state.assistant.process_message(user_id, prompt)
                     )
+                    logger.debug(f"Assistant response: {response}")
                     st.write(response)
-                    # Check if response is portfolio-related (case-insensitive)
-                    if "portfolio" in response.lower():
+                    if "portfolio" in response.lower() or "added" in response.lower():
                         portfolio = st.session_state.assistant.db_manager.get_portfolio(user_id)
                         if portfolio:
+                            logger.debug(f"Portfolio for chart: {portfolio.holdings}")
                             values = []
                             valid_holdings = {}
                             for symbol, quantity in portfolio.holdings.items():
@@ -912,42 +1055,53 @@ def main():
                                         value = hist['Close'].iloc[-1] * quantity
                                         values.append(value)
                                         valid_holdings[symbol] = quantity
+                                        logger.debug(f"Chart data for {symbol}: value={value}")
                                     else:
-                                        values.append(0.0)  # Fallback
+                                        values.append(0.0)
+                                        logger.warning(f"No data for {symbol}")
                                         st.warning(f"No data for {symbol}")
                                 except Exception as e:
                                     values.append(0.0)
+                                    logger.error(f"Error fetching data for {symbol}: {str(e)}")
                                     st.warning(f"Error fetching data for {symbol}: {str(e)}")
                             if any(v > 0 for v in values):
                                 display_portfolio_chart(valid_holdings, values)
                             else:
+                                logger.error("No valid stock data available for chart")
                                 st.error("No valid stock data available for chart.")
                     st.session_state.messages.append({"role": "assistant", "content": response})
                 except Exception as e:
                     error_msg = f"Error: {str(e)}"
+                    logger.error(f"Error processing prompt: {error_msg}", exc_info=True)
                     st.error(error_msg)
                     st.session_state.messages.append({"role": "assistant", "content": error_msg})
-    # Example queries section
+    
     st.markdown("---")
     st.markdown("### 💡 Try These Examples:")
-    
-    col1, col2, col3 = st.columns(3)
-    
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
-        if st.button("📈 Get RELIANCE stock price"):
+        if st.button("📈 Get RELIANCE price"):
             example_query = "What's the current price of RELIANCE stock?"
             st.session_state.messages.append({"role": "user", "content": example_query})
             st.rerun()
-    
     with col2:
-        if st.button("📊 Analyze my portfolio"):
+        if st.button("📊 Analyze portfolio"):
             example_query = "Can you analyze my portfolio performance?"
             st.session_state.messages.append({"role": "user", "content": example_query})
             st.rerun()
-    
     with col3:
-        if st.button("🔔 Check SIP reminders"):
+        if st.button("🔔 Check SIPs"):
             example_query = "Do I have any SIP payments due?"
+            st.session_state.messages.append({"role": "user", "content": example_query})
+            st.rerun()
+    with col4:
+        if st.button("➕ Add shares"):
+            example_query = "Add 10 RELIANCE shares to my portfolio"
+            st.session_state.messages.append({"role": "user", "content": example_query})
+            st.rerun()
+    with col5:
+        if st.button("⏰ Set SIP"):
+            example_query = "Set ₹5000 SIP for HDFC Fund on 15th"
             st.session_state.messages.append({"role": "user", "content": example_query})
             st.rerun()
     
