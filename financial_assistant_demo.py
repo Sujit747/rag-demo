@@ -1,5 +1,5 @@
 # Financial Assistant with LangChain, LangGraph & LlamaIndex
-# 2-Day Demo Implementation
+# 2-Day Demo Implementation - FIXED VERSION
 
 import os
 import streamlit as st
@@ -12,17 +12,19 @@ import sqlite3
 from dataclasses import dataclass, asdict
 import asyncio
 from pathlib import Path
-from llama_index.embeddings.openai import OpenAIEmbedding
-# Core imports for our framework stack
-# from langchain.llms import OpenAI
-from langchain_community.chat_models import ChatOpenAI
+from typing_extensions import TypedDict
+from typing import List, Dict, Any
+# FIXED IMPORTS - Updated to use the correct packages
+from langchain_openai import ChatOpenAI  # FIXED: Updated import
 from langchain.agents import AgentExecutor
 from langchain.tools import BaseTool
 from langchain.schema import AgentAction, AgentFinish
 from langchain.prompts import PromptTemplate
 from langchain.memory import ConversationBufferWindowMemory
 from langchain.callbacks.base import BaseCallbackHandler
-    
+import os
+from dotenv import load_dotenv
+load_dotenv()
 # LangGraph imports for workflow orchestration
 from langgraph.graph import StateGraph
 from langgraph.prebuilt import ToolNode
@@ -31,6 +33,7 @@ from langgraph.prebuilt import ToolNode
 from llama_index.core import VectorStoreIndex, Document, StorageContext
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.vector_stores.chroma import ChromaVectorStore
+from llama_index.embeddings.openai import OpenAIEmbedding
 import chromadb
 
 # ============================================================================
@@ -153,50 +156,116 @@ class DatabaseManager:
 # ============================================================================
 
 class StockPriceTool(BaseTool):
-   
     name: str = "stock_price_lookup"
     description: str = "Get current stock price and basic info for Indian/US stocks"
     
     def _run(self, symbol: str) -> str:
         try:
-            # Add .NS for Indian stocks if not present
-            if not symbol.endswith(('.NS', '.BO')) and len(symbol) <= 10:
-                symbol = symbol + '.NS'
+            # Stock symbol mapping for common Indian stocks
+            symbol_mapping = {
+                'RELIANCE': 'RELIANCE.NS',
+                'TCS': 'TCS.NS',
+                'HDFC': 'HDFCBANK.NS',
+                'HDFCBANK': 'HDFCBANK.NS',
+                'INFY': 'INFY.NS',
+                'INFOSYS': 'INFY.NS',
+                'ICICIBANK': 'ICICIBANK.NS',
+                'ICICI': 'ICICIBANK.NS',
+                'SBIN': 'SBIN.NS',
+                'SBI': 'SBIN.NS',
+                'ITC': 'ITC.NS',
+                'WIPRO': 'WIPRO.NS',
+                'LT': 'LT.NS',
+                'LARSEN': 'LT.NS',
+                'HCLTECH': 'HCLTECH.NS',
+                'HCL': 'HCLTECH.NS',
+                'BAJFINANCE': 'BAJFINANCE.NS',
+                'BAJAJ': 'BAJFINANCE.NS',
+                'MARUTI': 'MARUTI.NS',
+                'ASIANPAINT': 'ASIANPAINT.NS',
+                'ASIAN': 'ASIANPAINT.NS'
+            }
+            
+            # Clean and normalize symbol
+            original_symbol = symbol.upper().strip()
+            
+            # Check if it's in our mapping
+            if original_symbol in symbol_mapping:
+                symbol = symbol_mapping[original_symbol]
+            # If already has .NS or .BO, use as is
+            elif original_symbol.endswith(('.NS', '.BO')):
+                symbol = original_symbol
+            # For other symbols, try with .NS first
+            elif len(original_symbol) <= 10 and original_symbol.isalpha():
+                symbol = original_symbol + '.NS'
+            else:
+                symbol = original_symbol
+            
+            print(f"Looking up symbol: {symbol}")  # Debug print
             
             stock = yf.Ticker(symbol)
-            hist = stock.history(period="1d")
-            info = stock.info
             
-            if hist.empty:
-                return f"Could not find data for {symbol}"
+            # Try different periods to get data
+            hist = None
+            for period in ["1d", "5d", "1mo"]:
+                try:
+                    hist = stock.history(period=period)
+                    if not hist.empty:
+                        break
+                except:
+                    continue
+            
+            if hist is None or hist.empty:
+                # Try without .NS for international stocks
+                if symbol.endswith('.NS'):
+                    symbol_without_ns = symbol.replace('.NS', '')
+                    stock = yf.Ticker(symbol_without_ns)
+                    hist = stock.history(period="1d")
+                
+                if hist is None or hist.empty:
+                    return f"❌ Could not find data for {original_symbol}. Please check the symbol name."
+            
+            # Get stock info
+            try:
+                info = stock.info
+            except:
+                info = {}
             
             current_price = hist['Close'].iloc[-1]
-            change = hist['Close'].iloc[-1] - hist['Open'].iloc[-1]
-            change_pct = (change / hist['Open'].iloc[-1]) * 100
+            previous_close = hist['Open'].iloc[0] if len(hist) > 1 else current_price
+            change = current_price - previous_close
+            change_pct = (change / previous_close) * 100 if previous_close != 0 else 0
+            
+            # Format currency based on exchange
+            currency = "₹" if symbol.endswith(('.NS', '.BO')) else "$"
             
             return f"""
-            Stock: {symbol}
-            Current Price: ₹{current_price:.2f}
-            Change: ₹{change:.2f} ({change_pct:.2f}%)
-            Company: {info.get('longName', 'N/A')}
-            Sector: {info.get('sector', 'N/A')}
+📈 **{info.get('longName', symbol)} ({symbol})**
+
+💰 **Current Price**: {currency}{current_price:.2f}
+📊 **Change**: {currency}{change:.2f} ({change_pct:+.2f}%)
+🏢 **Company**: {info.get('shortName', info.get('longName', 'N/A'))}
+🏭 **Sector**: {info.get('sector', 'N/A')}
+📅 **Last Updated**: {hist.index[-1].strftime('%Y-%m-%d %H:%M')}
+
+💡 **Tip**: Stock data from Yahoo Finance
             """
         except Exception as e:
-            return f"Error fetching data for {symbol}: {str(e)}"
+            return f"❌ Error fetching data for {symbol}: {str(e)}\n\n💡 Try using common names like: RELIANCE, TCS, HDFC, INFY, SBI"
     
     async def _arun(self, symbol: str) -> str:
         return self._run(symbol)
-
-from langchain.tools import BaseTool
-from typing import Optional
 
 class PortfolioAnalysisTool(BaseTool):
     name: str = "portfolio_analysis"
     description: str = "Analyze user's portfolio performance"
     
-    def __init__(self, db_manager: DatabaseManager, **kwargs):
-        super().__init__(**kwargs)  # Pass any additional kwargs to BaseTool
-        self.db_manager = db_manager
+    # Use class attribute instead of instance attribute
+    _db_manager: Optional[DatabaseManager] = None
+    
+    @classmethod
+    def set_db_manager(cls, db_manager: DatabaseManager):
+        cls._db_manager = db_manager
     
     def _run(self, user_id: str) -> str:
         try:
@@ -261,12 +330,15 @@ class PortfolioAnalysisTool(BaseTool):
         return self._run(user_id)
 
 class SIPReminderTool(BaseTool):
-    name: str = "sip_reminder"
+    name: str = "sip_reminder_check"
     description: str = "Check for upcoming SIP payments"
     
-    def __init__(self, db_manager: DatabaseManager, **kwargs):
-        super().__init__(**kwargs)
-        self.db_manager = db_manager
+    # Use class attribute instead of instance attribute
+    _db_manager: Optional[DatabaseManager] = None
+    
+    @classmethod
+    def set_db_manager(cls, db_manager: DatabaseManager):
+        cls._db_manager = db_manager
     
     def _run(self, user_id: str) -> str:
         try:
@@ -304,14 +376,13 @@ class SIPReminderTool(BaseTool):
 # 3. LANGGRAPH WORKFLOW STATE & NODES
 # ============================================================================
 
-class AgentState:
-    def __init__(self):
-        self.messages: List[str] = []
-        self.user_id: str = ""
-        self.current_task: str = ""
-        self.context: Dict[str, Any] = {}
-        self.tool_results: Dict[str, str] = {}
-        self.final_response: str = ""
+class AgentState(TypedDict):
+    messages: List[str]
+    user_id: str
+    current_task: str
+    context: Dict[str, Any]
+    tool_results: Dict[str, str]
+    final_response: str
 
 class FinancialWorkflowGraph:
     def __init__(self, tools: List[BaseTool], llm, db_manager: DatabaseManager):
@@ -346,7 +417,7 @@ class FinancialWorkflowGraph:
     
     def classify_intent(self, state: AgentState) -> AgentState:
         """Classify user intent - what financial task they want to perform"""
-        last_message = state.messages[-1] if state.messages else ""
+        last_message = state["messages"][-1] if state["messages"] else ""
         
         intent_prompt = f"""
         Classify the user's financial intent from this message: "{last_message}"
@@ -361,22 +432,26 @@ class FinancialWorkflowGraph:
         Return only the intent name.
         """
         
-        intent = self.llm.predict(intent_prompt).strip().lower()
-        state.current_task = intent
-        state.context['intent'] = intent
+        response = self.llm.invoke(intent_prompt)
+        intent = response.content.strip().lower()
         
-        return state
+        # FIXED: Return updated state dict
+        return {
+            **state,
+            "current_task": intent,
+            "context": {**state["context"], "intent": intent}
+        }
     
     def fetch_user_context(self, state: AgentState) -> AgentState:
         """Fetch user profile and context from memory"""
-        profile = self.db_manager.get_user_profile(state.user_id)
+        profile = self.db_manager.get_user_profile(state["user_id"])
         
         if profile:
-            state.context['user_profile'] = asdict(profile)
+            user_profile = asdict(profile)
         else:
             # Create default profile for demo
             default_profile = UserProfile(
-                user_id=state.user_id,
+                user_id=state["user_id"],
                 risk_tolerance="Moderate",
                 investment_goals=["Retirement", "Wealth Creation"],
                 monthly_sip_amount=10000,
@@ -385,14 +460,19 @@ class FinancialWorkflowGraph:
                 last_interaction=datetime.now()
             )
             self.db_manager.save_user_profile(default_profile)
-            state.context['user_profile'] = asdict(default_profile)
+            user_profile = asdict(default_profile)
         
-        return state
+        # FIXED: Return updated state dict
+        return {
+            **state,
+            "context": {**state["context"], "user_profile": user_profile}
+        }
     
     def execute_financial_task(self, state: AgentState) -> AgentState:
         """Execute the appropriate financial task based on intent"""
-        intent = state.current_task
-        last_message = state.messages[-1] if state.messages else ""
+        intent = state["current_task"]
+        last_message = state["messages"][-1] if state["messages"] else ""
+        tool_results = {}
         
         try:
             if intent == "stock_lookup":
@@ -406,31 +486,35 @@ class FinancialWorkflowGraph:
                 
                 if symbol:
                     result = self.tools["stock_price_lookup"]._run(symbol)
-                    state.tool_results["stock_data"] = result
+                    tool_results["stock_data"] = result
                 else:
-                    state.tool_results["stock_data"] = "Please specify a stock symbol."
+                    tool_results["stock_data"] = "Please specify a stock symbol."
                     
             elif intent == "portfolio_analysis":
-                result = self.tools["portfolio_analysis"]._run(state.user_id)
-                state.tool_results["portfolio_analysis"] = result
+                result = self.tools["portfolio_analysis"]._run(state["user_id"])
+                tool_results["portfolio_analysis"] = result
                 
             elif intent == "sip_reminder":
-                result = self.tools["sip_reminder_check"]._run(state.user_id)
-                state.tool_results["sip_reminders"] = result
+                result = self.tools["sip_reminder_check"]._run(state["user_id"])
+                tool_results["sip_reminders"] = result
                 
             else:
-                state.tool_results["general"] = "I can help with stock lookups, portfolio analysis, and SIP reminders. What would you like to know?"
+                tool_results["general"] = "I can help with stock lookups, portfolio analysis, and SIP reminders. What would you like to know?"
                 
         except Exception as e:
-            state.tool_results["error"] = f"Error executing task: {str(e)}"
+            tool_results["error"] = f"Error executing task: {str(e)}"
         
-        return state
+        # FIXED: Return updated state dict
+        return {
+            **state,
+            "tool_results": {**state["tool_results"], **tool_results}
+        }
     
     def generate_response(self, state: AgentState) -> AgentState:
         """Generate final response using LLM with context"""
-        user_profile = state.context.get('user_profile', {})
-        tool_results = state.tool_results
-        last_message = state.messages[-1] if state.messages else ""
+        user_profile = state["context"].get("user_profile", {})
+        tool_results = state["tool_results"]
+        last_message = state["messages"][-1] if state["messages"] else ""
         
         response_prompt = f"""
         You are a helpful financial assistant. Generate a personalized response based on:
@@ -444,26 +528,29 @@ class FinancialWorkflowGraph:
         Keep it conversational and under 200 words.
         """
         
-        response = self.llm.predict(response_prompt)
-        state.final_response = response
+        response = self.llm.invoke(response_prompt)
         
-        return state
+        # FIXED: Return updated state dict
+        return {
+            **state,
+            "final_response": response.content
+        }
     
     def update_memory(self, state: AgentState) -> AgentState:
         """Update user interaction memory"""
         # Update last interaction time
-        profile = self.db_manager.get_user_profile(state.user_id)
+        profile = self.db_manager.get_user_profile(state["user_id"])
         if profile:
             profile.last_interaction = datetime.now()
             self.db_manager.save_user_profile(profile)
         
+        # FIXED: Return state dict unchanged
         return state
+
 
 # ============================================================================
 # 4. LLAMAINDEX MEMORY & CONTEXT MANAGEMENT
 # ============================================================================
-
-
 
 class LlamaIndexMemoryManager:
     def __init__(self, persist_dir: str = "./memory_storage", openai_api_key: str = None):
@@ -545,20 +632,26 @@ class FinancialAssistant:
     def __init__(self, openai_api_key: str):
         # Initialize core components
         self.db_manager = DatabaseManager()
-        self.memory_manager = LlamaIndexMemoryManager()
+        self.memory_manager = LlamaIndexMemoryManager(openai_api_key=openai_api_key)
         
         # Initialize LLM
         self.llm = ChatOpenAI(
             temperature=0.7,
-            model_name="gpt-3.5-turbo",
+            model="gpt-3.5-turbo",
             api_key=openai_api_key
         )
         
         # Initialize tools
+        portfolio_tool = PortfolioAnalysisTool()
+        PortfolioAnalysisTool.set_db_manager(self.db_manager)
+        
+        sip_tool = SIPReminderTool()
+        SIPReminderTool.set_db_manager(self.db_manager)
+        
         self.tools = [
             StockPriceTool(),
-            PortfolioAnalysisTool(self.db_manager),
-            SIPReminderTool(self.db_manager)
+            portfolio_tool,
+            sip_tool
         ]
         
         # Initialize LangGraph workflow
@@ -568,17 +661,22 @@ class FinancialAssistant:
     
     async def process_message(self, user_id: str, message: str) -> str:
         """Process user message through the complete workflow"""
-        # Create initial state
-        state = AgentState()
-        state.user_id = user_id
-        state.messages = [message]
+        # FIXED: Create initial state as dict
+        initial_state = {
+            "messages": [message],
+            "user_id": user_id,
+            "current_task": "",
+            "context": {},
+            "tool_results": {},
+            "final_response": ""
+        }
         
         try:
             # Run through LangGraph workflow
-            final_state = await self.workflow_graph.app.ainvoke(state)
+            final_state = await self.workflow_graph.app.ainvoke(initial_state)
             
             # Get response
-            response = final_state.final_response
+            response = final_state["final_response"]
             
             # Update LlamaIndex memory
             self.memory_manager.add_interaction(user_id, message, response)
@@ -743,22 +841,22 @@ if __name__ == "__main__":
     main()
 
 # ============================================================================
-# 7. REQUIREMENTS.TXT
+# 7. UPDATED REQUIREMENTS.TXT
 # ============================================================================
 
-# Requirements for the demo:
+# Requirements for the demo - UPDATED:
 """
 streamlit>=1.28.0
-langchain>=0.0.300
+langchain>=0.1.0
+langchain-openai>=0.1.0
 langgraph>=0.0.40
 llama-index>=0.8.0
 llama-index-vector-stores-chroma>=0.1.0
-openai>=0.28.0
+llama-index-embeddings-openai>=0.1.0
+openai>=1.0.0
 yfinance>=0.2.0
 pandas>=1.5.0
 chromadb>=0.4.0
-sqlite3
-asyncio
 python-dateutil
 """
 
@@ -767,47 +865,34 @@ python-dateutil
 # ============================================================================
 
 """
-DAY 1 SETUP & DEMO:
-1. Install requirements: pip install -r requirements.txt
-2. Run: streamlit run financial_assistant_demo.py
-3. Demo LangChain tools and LangGraph workflows
-4. Show agent orchestration and multi-step processing
+INSTALLATION & SETUP:
+
+1. Install the updated requirements:
+   pip install streamlit langchain langchain-openai langgraph llama-index llama-index-vector-stores-chroma llama-index-embeddings-openai openai yfinance pandas chromadb python-dateutil
+
+2. Run the demo:
+   streamlit run financial_assistant_demo.py
+
+3. Enter your OpenAI API key in the sidebar
+
+KEY FIXES APPLIED:
+
+✅ Updated ChatOpenAI import from langchain-openai package
+✅ Updated LLM invocation methods (predict → invoke)
+✅ Fixed tool name consistency (sip_reminder_check)
+✅ Passed OpenAI API key to LlamaIndex memory manager
+✅ Updated requirements with correct package versions
+✅ Maintained all original functionality
+
+DAY 1 DEMO FEATURES:
+- Real-time stock price lookup
+- Portfolio analysis with mock data
+- SIP reminder system
+- Multi-step LangGraph workflows
 
 DAY 2 ENHANCEMENTS:
-1. Add more sophisticated LlamaIndex memory queries
-2. Implement user preference learning
-3. Add financial goal tracking
-4. Demo persistent memory across sessions
-
-PRESENTATION TALKING POINTS:
-
-LangChain Features:
-- Custom tool creation for domain-specific tasks
-- Agent orchestration with memory
-- Structured prompt templates
-- Error handling and recovery
-
-LangGraph Features:
-- Visual workflow representation
-- State management across nodes
-- Conditional routing based on intent
-- Async processing capabilities
-
-LlamaIndex Features:
-- Vector-based memory storage
-- Context-aware information retrieval
-- Persistent cross-session memory
-- Semantic search capabilities
-
-Real-world Applications:
-- Personal finance management
-- Investment advisory systems
-- Automated financial reporting
-- Risk assessment and compliance
-
-Scalability Considerations:
-- Database optimization for large user bases
-- Caching strategies for frequent queries
-- API rate limiting and error handling
-- Security and privacy considerations
+- Persistent memory across sessions
+- Personalized financial recommendations
+- Advanced context management
+- User preference learning
 """
