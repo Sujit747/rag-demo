@@ -1,4 +1,5 @@
 from llama_index.core import VectorStoreIndex, Document, StorageContext
+from llama_index.core.memory import ChatMemoryBuffer  # Added missing import
 from llama_index.vector_stores.faiss import FaissVectorStore
 from llama_index.embeddings.openai import OpenAIEmbedding
 import faiss

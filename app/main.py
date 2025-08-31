@@ -5,6 +5,7 @@ import json
 import os
 import logging
 from core.assistant import FinancialAssistant
+import yfinance as yf
 
 def display_portfolio_chart(holdings, values):
     chart_config = {

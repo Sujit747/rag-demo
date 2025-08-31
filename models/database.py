@@ -1,141 +1,108 @@
-import sqlite3
-import json
+from supabase import create_client, Client
 from typing import Optional, List
 from models.data_models import UserProfile, Portfolio, FinancialGoal
 from datetime import datetime
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class DatabaseManager:
-    def __init__(self, db_path: str = "financial_assistant.db"):
-        self.db_path = db_path
-        self.init_database()
-    
-    def init_database(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS user_profiles (
-                user_id TEXT PRIMARY KEY,
-                risk_tolerance TEXT,
-                investment_goals TEXT,
-                monthly_sip_amount REAL,
-                preferred_sectors TEXT,
-                created_at TIMESTAMP,
-                last_interaction TIMESTAMP
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS portfolios (
-                user_id TEXT PRIMARY KEY,
-                holdings TEXT,
-                total_value REAL,
-                last_updated TIMESTAMP
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS financial_goals (
-                goal_id TEXT PRIMARY KEY,
-                user_id TEXT,
-                goal_type TEXT,
-                target_amount REAL,
-                current_amount REAL,
-                deadline TIMESTAMP,
-                status TEXT
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
+    def __init__(self):
+        self.supabase_url = os.getenv("SUPABASE_URL")
+        self.supabase_key = os.getenv("SUPABASE_KEY")
+        if not self.supabase_url or not self.supabase_key:
+            raise ValueError("SUPABASE_URL or SUPABASE_KEY not found in .env file")
+        self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
     
     def save_user_profile(self, profile: UserProfile):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO user_profiles VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            profile.user_id,
-            profile.risk_tolerance,
-            json.dumps(profile.investment_goals),
-            profile.monthly_sip_amount,
-            json.dumps(profile.preferred_sectors),
-            profile.created_at,
-            profile.last_interaction
-        ))
-        conn.commit()
-        conn.close()
+        data = {
+            "user_id": profile.user_id,
+            "risk_tolerance": profile.risk_tolerance,
+            "investment_goals": profile.investment_goals,
+            "monthly_sip_amount": profile.monthly_sip_amount,
+            "preferred_sectors": profile.preferred_sectors,
+            "created_at": profile.created_at.isoformat(),  # Convert to string
+            "last_interaction": profile.last_interaction.isoformat()  # Convert to string
+        }
+        self.supabase.table("user_profiles").upsert(data).execute()
     
     def get_user_profile(self, user_id: str) -> Optional[UserProfile]:
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM user_profiles WHERE user_id = ?', (user_id,))
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
+        response = self.supabase.table("user_profiles").select("*").eq("user_id", user_id).execute()
+        if response.data:
+            row = response.data[0]
             return UserProfile(
-                user_id=row[0],
-                risk_tolerance=row[1],
-                investment_goals=json.loads(row[2]),
-                monthly_sip_amount=row[3],
-                preferred_sectors=json.loads(row[4]),
-                created_at=row[5],
-                last_interaction=row[6]
+                user_id=row["user_id"],
+                risk_tolerance=row["risk_tolerance"],
+                investment_goals=row["investment_goals"],
+                monthly_sip_amount=row["monthly_sip_amount"],
+                preferred_sectors=row["preferred_sectors"],
+                created_at=datetime.fromisoformat(row["created_at"]),  # Convert back to datetime
+                last_interaction=datetime.fromisoformat(row["last_interaction"])  # Convert back to datetime
             )
-        return None
+        # Initialize default profile if none exists
+        default_profile = UserProfile(
+            user_id=user_id,
+            risk_tolerance="Moderate",
+            investment_goals=["Retirement", "Wealth Creation"],
+            monthly_sip_amount=10000.0,
+            preferred_sectors=["Technology", "Banking"],
+            created_at=datetime.now(),
+            last_interaction=datetime.now()
+        )
+        self.save_user_profile(default_profile)
+        return default_profile
 
     def save_portfolio(self, portfolio: Portfolio):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO portfolios VALUES (?, ?, ?, ?)
-        ''', (
-            portfolio.user_id,
-            json.dumps(portfolio.holdings),
-            portfolio.total_value,
-            portfolio.last_updated
-        ))
-        conn.commit()
-        conn.close()
+        data = {
+            "user_id": portfolio.user_id,
+            "holdings": portfolio.holdings,
+            "total_value": portfolio.total_value,
+            "last_updated": portfolio.last_updated.isoformat()  # Convert to string
+        }
+        self.supabase.table("portfolios").upsert(data).execute()
 
     def get_portfolio(self, user_id: str) -> Optional[Portfolio]:
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM portfolios WHERE user_id = ?', (user_id,))
-        row = cursor.fetchone()
-        conn.close()
-        if row:
+        response = self.supabase.table("portfolios").select("*").eq("user_id", user_id).execute()
+        if response.data:
+            row = response.data[0]
             return Portfolio(
-                user_id=row[0],
-                holdings=json.loads(row[1]),
-                total_value=row[2],
-                last_updated=row[3]
+                user_id=row["user_id"],
+                holdings=row["holdings"],
+                total_value=row["total_value"],
+                last_updated=datetime.fromisoformat(row["last_updated"])  # Convert back to datetime
             )
-        return None
+        # Initialize default portfolio if none exists
+        default_portfolio = Portfolio(
+            user_id=user_id,
+            holdings={},
+            total_value=0.0,
+            last_updated=datetime.now()
+        )
+        self.save_portfolio(default_portfolio)
+        return default_portfolio
     
     def save_financial_goals(self, goals: List[FinancialGoal]):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
         for goal in goals:
-            cursor.execute('''
-                INSERT OR REPLACE INTO financial_goals VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                goal.goal_id,
-                goal.user_id,
-                goal.goal_type,
-                goal.target_amount,
-                goal.current_amount,
-                goal.deadline,
-                goal.status
-            ))
-        conn.commit()
-        conn.close()
+            data = {
+                "goal_id": goal.goal_id,
+                "user_id": goal.user_id,
+                "goal_type": goal.goal_type,
+                "target_amount": goal.target_amount,
+                "current_amount": goal.current_amount,
+                "deadline": goal.deadline.isoformat(),  # Convert to string
+                "status": goal.status
+            }
+            self.supabase.table("financial_goals").upsert(data).execute()
 
     def get_financial_goals(self, user_id: str) -> List[FinancialGoal]:
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM financial_goals WHERE user_id = ?', (user_id,))
-        rows = cursor.fetchall()
-        conn.close()
-        return [FinancialGoal(*row) for row in rows]
+        response = self.supabase.table("financial_goals").select("*").eq("user_id", user_id).execute()
+        return [FinancialGoal(
+            goal_id=row["goal_id"],
+            user_id=row["user_id"],
+            goal_type=row["goal_type"],
+            target_amount=row["target_amount"],
+            current_amount=row["current_amount"],
+            deadline=datetime.fromisoformat(row["deadline"]),  # Convert back to datetime
+            status=row["status"]
+        ) for row in response.data] or []  # Return empty list if no data
