@@ -1,5 +1,5 @@
-# Financial Assistant with LangChain, LangGraph & LlamaIndex
-# 2-Day Demo Implementation - FIXED VERSION
+# Financial Assistant with LangChain, LangGraph & LlamaIndex - FAISS VERSION
+# 2-Day Demo Implementation - UPDATED WITH FAISS
 import streamlit.components.v1 as components
 import os
 import streamlit as st
@@ -29,12 +29,14 @@ load_dotenv()
 from langgraph.graph import StateGraph
 from langgraph.prebuilt import ToolNode
 
-# LlamaIndex for advanced memory and context management
+# LlamaIndex with FAISS imports
 from llama_index.core import VectorStoreIndex, Document, StorageContext
 from llama_index.core.memory import ChatMemoryBuffer
-from llama_index.vector_stores.chroma import ChromaVectorStore
+from llama_index.vector_stores.faiss import FaissVectorStore  # CHANGED: Using FAISS instead of Chroma
 from llama_index.embeddings.openai import OpenAIEmbedding
-import chromadb
+import faiss  # ADDED: FAISS import
+import numpy as np  # ADDED: For FAISS operations
+import pickle  # ADDED: For metadata persistence
 from langchain_core.tools import BaseTool
 from datetime import datetime
 import yfinance as yf
@@ -786,21 +788,24 @@ class FinancialWorkflowGraph:
 
 
 # ============================================================================
-# 4. LLAMAINDEX MEMORY & CONTEXT MANAGEMENT
+# 4. LLAMAINDEX MEMORY & CONTEXT MANAGEMENT WITH FAISS
 # ============================================================================
 
-class LlamaIndexMemoryManager:
-    def __init__(self, persist_dir: str = "./memory_storage", openai_api_key: str = None):
+class LlamaIndexMemoryManagerFAISS:
+    """
+    Updated memory manager using FAISS instead of ChromaDB for vector storage
+    """
+    def __init__(self, persist_dir: str = "./memory_storage", openai_api_key: str = None, dimension: int = 1536):
         self.persist_dir = Path(persist_dir)
         self.persist_dir.mkdir(exist_ok=True)
+        self.dimension = dimension  # OpenAI text-embedding-ada-002 dimension
         
-        # Initialize ChromaDB for vector storage
-        self.chroma_client = chromadb.PersistentClient(path=str(self.persist_dir / "chroma_db"))
-        self.chroma_collection = self.chroma_client.get_or_create_collection("financial_memory")
+        # FAISS index paths
+        self.faiss_index_path = self.persist_dir / "faiss_index.bin"
+        self.metadata_path = self.persist_dir / "metadata.pkl"
         
-        # Create vector store
-        self.vector_store = ChromaVectorStore(chroma_collection=self.chroma_collection)
-        self.storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
+        # Initialize FAISS index
+        self._initialize_faiss_index()
         
         # Set OpenAI embedding model with API key
         self.embed_model = OpenAIEmbedding(
@@ -808,7 +813,11 @@ class LlamaIndexMemoryManager:
             api_key=openai_api_key
         )
         
-        # Initialize empty index with explicit embed_model
+        # Create FAISS vector store
+        self.vector_store = FaissVectorStore(faiss_index=self.faiss_index)
+        self.storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
+        
+        # Initialize index with FAISS vector store
         self.index = VectorStoreIndex(
             [],
             storage_context=self.storage_context,
@@ -817,63 +826,208 @@ class LlamaIndexMemoryManager:
         
         # Chat memory buffer
         self.chat_memory = ChatMemoryBuffer.from_defaults(token_limit=3000)
+        
+        print(f"✅ FAISS Memory Manager initialized with dimension {self.dimension}")
+    
+    def _initialize_faiss_index(self):
+        """Initialize or load FAISS index"""
+        try:
+            if self.faiss_index_path.exists():
+                # Load existing FAISS index
+                self.faiss_index = faiss.read_index(str(self.faiss_index_path))
+                print(f"📂 Loaded existing FAISS index with {self.faiss_index.ntotal} vectors")
+            else:
+                # Create new FAISS index (using IndexFlatIP for cosine similarity)
+                self.faiss_index = faiss.IndexFlatIP(self.dimension)
+                print("🆕 Created new FAISS index")
+                
+            # Load metadata
+            if self.metadata_path.exists():
+                with open(self.metadata_path, 'rb') as f:
+                    self.metadata_store = pickle.load(f)
+                print(f"📂 Loaded {len(self.metadata_store)} metadata entries")
+            else:
+                self.metadata_store = {}
+                print("🆕 Created new metadata store")
+                
+        except Exception as e:
+            print(f"⚠️ Error loading FAISS index, creating new one: {str(e)}")
+            self.faiss_index = faiss.IndexFlatIP(self.dimension)
+            self.metadata_store = {}
+    
+    def _save_faiss_index(self):
+        """Save FAISS index and metadata to disk"""
+        try:
+            # Save FAISS index
+            faiss.write_index(self.faiss_index, str(self.faiss_index_path))
+            
+            # Save metadata
+            with open(self.metadata_path, 'wb') as f:
+                pickle.dump(self.metadata_store, f)
+                
+            print(f"💾 Saved FAISS index with {self.faiss_index.ntotal} vectors")
+        except Exception as e:
+            print(f"❌ Error saving FAISS index: {str(e)}")
     
     def add_interaction(self, user_id: str, user_message: str, assistant_response: str):
-        """Add a user interaction to long-term memory"""
-        self.cleanup_old_interactions(user_id)
-        interaction_doc = Document(
-            text=f"User: {user_message}\nAssistant: {assistant_response}",
-            metadata={
+        """Add a user interaction to long-term memory using FAISS"""
+        try:
+            # Clean up old interactions first
+            self.cleanup_old_interactions(user_id)
+            
+            # Create document text
+            interaction_text = f"User: {user_message}\nAssistant: {assistant_response}"
+            
+            # Generate embedding
+            embedding = self.embed_model.get_text_embedding(interaction_text)
+            embedding_array = np.array([embedding], dtype=np.float32)
+            
+            # Normalize for cosine similarity (FAISS IndexFlatIP expects normalized vectors)
+            faiss.normalize_L2(embedding_array)
+            
+            # Add to FAISS index
+            self.faiss_index.add(embedding_array)
+            
+            # Store metadata
+            doc_id = f"interaction_{user_id}_{datetime.now().isoformat()}_{self.faiss_index.ntotal-1}"
+            self.metadata_store[self.faiss_index.ntotal-1] = {
+                "doc_id": doc_id,
                 "user_id": user_id,
+                "text": interaction_text,
                 "timestamp": datetime.now().isoformat(),
                 "interaction_type": "conversation"
             }
-        )
-        
-        self.index.insert(interaction_doc)
+            
+            # Save to disk
+            self._save_faiss_index()
+            
+            print(f"➕ Added interaction to FAISS memory: {len(interaction_text)} chars")
+            
+        except Exception as e:
+            print(f"❌ Error adding interaction to FAISS memory: {str(e)}")
     
     def add_financial_data(self, user_id: str, data_type: str, data: str):
-        """Add financial data to memory"""
-        data_doc = Document(
-            text=data,
-            metadata={
+        """Add financial data to FAISS memory"""
+        try:
+            # Generate embedding
+            embedding = self.embed_model.get_text_embedding(data)
+            embedding_array = np.array([embedding], dtype=np.float32)
+            
+            # Normalize for cosine similarity
+            faiss.normalize_L2(embedding_array)
+            
+            # Add to FAISS index
+            self.faiss_index.add(embedding_array)
+            
+            # Store metadata
+            doc_id = f"data_{user_id}_{data_type}_{datetime.now().isoformat()}_{self.faiss_index.ntotal-1}"
+            self.metadata_store[self.faiss_index.ntotal-1] = {
+                "doc_id": doc_id,
                 "user_id": user_id,
+                "text": data,
                 "data_type": data_type,
                 "timestamp": datetime.now().isoformat()
             }
-        )
-        
-        self.index.insert(data_doc)
+            
+            # Save to disk
+            self._save_faiss_index()
+            
+            print(f"➕ Added financial data to FAISS memory: {data_type}")
+            
+        except Exception as e:
+            print(f"❌ Error adding financial data to FAISS memory: {str(e)}")
     
     def query_memory(self, user_id: str, query: str, top_k: int = 3) -> str:
-        """Query user's interaction history"""
-        query_engine = self.index.as_query_engine(
-            similarity_top_k=top_k,
-            filters={"user_id": user_id}
-        )
-        
-        response = query_engine.query(query)
-        return str(response)
+        """Query user's interaction history using FAISS similarity search"""
+        try:
+            if self.faiss_index.ntotal == 0:
+                return "No previous interactions found."
+            
+            # Generate query embedding
+            query_embedding = self.embed_model.get_text_embedding(query)
+            query_array = np.array([query_embedding], dtype=np.float32)
+            
+            # Normalize for cosine similarity
+            faiss.normalize_L2(query_array)
+            
+            # Search FAISS index
+            similarities, indices = self.faiss_index.search(query_array, min(top_k * 2, self.faiss_index.ntotal))
+            
+            # Filter by user_id and collect results
+            results = []
+            for similarity, idx in zip(similarities[0], indices[0]):
+                if idx in self.metadata_store:
+                    metadata = self.metadata_store[idx]
+                    if metadata.get("user_id") == user_id and similarity > 0.1:  # Similarity threshold
+                        results.append({
+                            "text": metadata["text"],
+                            "similarity": float(similarity),
+                            "timestamp": metadata["timestamp"]
+                        })
+            
+            # Sort by similarity and take top_k
+            results = sorted(results, key=lambda x: x["similarity"], reverse=True)[:top_k]
+            
+            if not results:
+                return "No relevant previous interactions found."
+            
+            # Format response
+            response_parts = []
+            for i, result in enumerate(results, 1):
+                response_parts.append(f"{i}. {result['text'][:200]}... (Similarity: {result['similarity']:.3f})")
+            
+            return "Previous relevant interactions:\n" + "\n\n".join(response_parts)
+            
+        except Exception as e:
+            print(f"❌ Error querying FAISS memory: {str(e)}")
+            return "Error retrieving previous interactions."
     
     def get_user_context(self, user_id: str) -> str:
-        """Get recent context for a user"""
+        """Get recent context for a user using FAISS"""
         try:
             return self.query_memory(user_id, "recent interactions and preferences", top_k=5)
-        except:
+        except Exception as e:
+            print(f"❌ Error getting user context: {str(e)}")
             return "No previous context available."
 
     def cleanup_old_interactions(self, user_id: str, days_threshold: int = 30):
-        cutoff_date = (datetime.now() - timedelta(days=days_threshold)).isoformat()
+        """Clean up old interactions from FAISS index"""
         try:
-            documents = self.chroma_collection.get(where={"user_id": user_id})
-            for doc_id, metadata in zip(documents.get("ids", []), documents.get("metadatas", [])):
-                if metadata and metadata.get("timestamp", "") < cutoff_date:
-                    self.chroma_collection.delete(ids=[doc_id])
+            cutoff_date = (datetime.now() - timedelta(days=days_threshold)).isoformat()
+            
+            # Find indices to remove
+            indices_to_remove = []
+            for idx, metadata in self.metadata_store.items():
+                if (metadata.get("user_id") == user_id and 
+                    metadata.get("timestamp", "") < cutoff_date):
+                    indices_to_remove.append(idx)
+            
+            # Remove old metadata (FAISS doesn't support direct removal, so we mark for cleanup)
+            for idx in indices_to_remove:
+                if idx in self.metadata_store:
+                    del self.metadata_store[idx]
+            
+            if indices_to_remove:
+                print(f"🧹 Marked {len(indices_to_remove)} old interactions for cleanup")
+                self._save_faiss_index()
+            
+            # Note: For production, you might want to periodically rebuild the FAISS index 
+            # to actually remove old vectors, but for demo purposes, we just remove metadata
+            
         except Exception as e:
-            print(f"Cleanup error: {str(e)}")  # Silent fail for demo
+            print(f"⚠️ Cleanup error: {str(e)}")  # Silent fail for demo
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get statistics about the FAISS memory store"""
+        return {
+            "total_vectors": self.faiss_index.ntotal,
+            "total_metadata": len(self.metadata_store),
+            "dimension": self.dimension,
+            "index_type": type(self.faiss_index).__name__
+        }
 
 # ============================================================================
-# 5. MAIN FINANCIAL ASSISTANT CLASS
+# 5. MAIN FINANCIAL ASSISTANT CLASS (UPDATED FOR FAISS)
 # ============================================================================
 
 class FinancialAssistant:
@@ -883,7 +1037,8 @@ class FinancialAssistant:
             raise ValueError("OPENAI_API_KEY not found in .env file")
         
         self.db_manager = DatabaseManager()
-        self.memory_manager = LlamaIndexMemoryManager(openai_api_key=openai_api_key)
+        # CHANGED: Using FAISS-based memory manager
+        self.memory_manager = LlamaIndexMemoryManagerFAISS(openai_api_key=openai_api_key)
         self.llm = ChatOpenAI(
             temperature=0.7,
             model="gpt-3.5-turbo",
@@ -909,7 +1064,7 @@ class FinancialAssistant:
         ]
         
         self.workflow_graph = FinancialWorkflowGraph(self.tools, self.llm, self.db_manager)
-        print("✅ Financial Assistant initialized with LangChain + LangGraph + LlamaIndex")
+        print("✅ Financial Assistant initialized with LangChain + LangGraph + LlamaIndex + FAISS")
     
     async def process_message(self, user_id: str, message: str) -> str:
         initial_state = {
@@ -932,9 +1087,13 @@ class FinancialAssistant:
     
     def get_user_insights(self, user_id: str) -> str:
         return self.memory_manager.get_user_context(user_id)
+    
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """Get FAISS memory statistics"""
+        return self.memory_manager.get_stats()
 
 # ============================================================================
-# 6. STREAMLIT DEMO INTERFACE
+# 6. STREAMLIT DEMO INTERFACE (UPDATED FOR FAISS)
 # ============================================================================
 def display_portfolio_chart(holdings, values):
     chart_config = {
@@ -980,12 +1139,12 @@ def main():
     logger = logging.getLogger(__name__)
     
     st.set_page_config(
-        page_title="Financial Assistant Demo",
+        page_title="Financial Assistant Demo - FAISS Edition",
         page_icon="💰",
         layout="wide"
     )
-    st.title("🤖 Financial Assistant Demo")
-    st.subheader("Powered by LangChain + LangGraph + LlamaIndex")
+    st.title("🤖 Financial Assistant Demo - FAISS Edition")
+    st.subheader("Powered by LangChain + LangGraph + LlamaIndex + FAISS")
     
     with st.sidebar:
         st.header("⚙️ Configuration")
@@ -999,6 +1158,7 @@ def main():
         st.markdown("- **LangChain**: Agent & tool orchestration")
         st.markdown("- **LangGraph**: Multi-step workflow management")
         st.markdown("- **LlamaIndex**: Context & memory management")
+        st.markdown("- **FAISS**: High-performance vector similarity search")
         st.markdown("- **yFinance**: Real financial data")
         st.markdown("---")
         st.markdown("### 🎯 Demo Features")
@@ -1007,7 +1167,21 @@ def main():
         st.markdown("- SIP reminders")
         st.markdown("- Add portfolio shares")
         st.markdown("- Set SIP reminders")
-        st.markdown("- Long-term memory")
+        st.markdown("- Long-term memory with FAISS")
+        st.markdown("---")
+        
+        # FAISS Memory Statistics
+        if 'assistant' in st.session_state:
+            st.markdown("### 📊 FAISS Memory Stats")
+            try:
+                stats = st.session_state.assistant.get_memory_stats()
+                st.metric("Total Vectors", stats["total_vectors"])
+                st.metric("Metadata Entries", stats["total_metadata"])
+                st.metric("Vector Dimension", stats["dimension"])
+                st.text(f"Index Type: {stats['index_type']}")
+            except Exception as e:
+                st.error(f"Error loading stats: {str(e)}")
+        
         st.markdown("---")
         st.markdown("### 📜 Debug Log")
         if os.path.exists('financial_assistant.log'):
@@ -1016,9 +1190,10 @@ def main():
     
     if 'assistant' not in st.session_state:
         try:
-            logger.info("Initializing Financial Assistant")
-            st.session_state.assistant = FinancialAssistant()
-            st.success("✅ Financial Assistant ready!")
+            logger.info("Initializing Financial Assistant with FAISS")
+            with st.spinner("Initializing FAISS vector database..."):
+                st.session_state.assistant = FinancialAssistant()
+            st.success("✅ Financial Assistant with FAISS ready!")
         except Exception as e:
             logger.error(f"Error initializing assistant: {str(e)}", exc_info=True)
             st.error(f"❌ Error initializing assistant: {str(e)}")
@@ -1037,7 +1212,7 @@ def main():
         with st.chat_message("user"):
             st.write(prompt)
         with st.chat_message("assistant"):
-            with st.spinner("Processing your request..."):
+            with st.spinner("Processing your request with FAISS memory..."):
                 try:
                     response = asyncio.run(
                         st.session_state.assistant.process_message(user_id, prompt)
@@ -1108,6 +1283,23 @@ def main():
             st.session_state.messages.append({"role": "user", "content": example_query})
             st.rerun()
     
+    # FAISS-specific features
+    st.markdown("---")
+    st.markdown("### 🧠 FAISS Memory Features:")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔍 Query Memory"):
+            example_query = "What did we discuss about my investment preferences?"
+            st.session_state.messages.append({"role": "user", "content": example_query})
+            st.rerun()
+    with col2:
+        if st.button("📈 Memory Context"):
+            if 'assistant' in st.session_state:
+                context = st.session_state.assistant.get_user_insights(user_id)
+                st.info(f"User Context:\n{context}")
+            else:
+                st.warning("Assistant not initialized yet")
+
 
 if __name__ == "__main__":
     main()
