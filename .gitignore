@@ -7,3 +7,4 @@ models/__pycache__
 tools/__pycache__
 workflow/__pycache__
 data/
+tests/
