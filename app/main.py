@@ -6,6 +6,7 @@ import os
 import logging
 from core.assistant import FinancialAssistant
 import yfinance as yf
+from tools.document_rag import DocumentRAGTool
 
 def display_portfolio_chart(holdings, values):
     chart_config = {
@@ -70,6 +71,7 @@ def main():
         st.markdown("- **LlamaIndex**: Context & memory management")
         st.markdown("- **FAISS**: High-performance vector similarity search")
         st.markdown("- **yFinance**: Real financial data")
+        st.markdown("- **RAG**: Document-based Q&A")
         st.markdown("---")
         st.markdown("### 🎯 Demo Features")
         st.markdown("- Stock price lookup")
@@ -78,6 +80,7 @@ def main():
         st.markdown("- Add portfolio shares")
         st.markdown("- Set SIP reminders")
         st.markdown("- Long-term memory with FAISS")
+        st.markdown("- Document Q&A with RAG")
         st.markdown("---")
         
         if 'assistant' in st.session_state:
@@ -90,6 +93,13 @@ def main():
                 st.text(f"Index Type: {stats['index_type']}")
             except Exception as e:
                 st.error(f"Error loading stats: {str(e)}")
+        
+        st.markdown("### 📄 Document Upload")
+        uploaded_file = st.file_uploader("Upload a PDF for RAG", type=["pdf"])
+        rag_tool = DocumentRAGTool()
+        if uploaded_file:
+            success, message = rag_tool.handle_file_upload(uploaded_file)
+            st.text(message)
         
         st.markdown("---")
         st.markdown("### 📜 Debug Log")
@@ -115,7 +125,7 @@ def main():
         with st.chat_message(message["role"]):
             st.write(message["content"])
 
-    if prompt := st.chat_input("Ask me about stocks, portfolio, SIPs, or financial advice..."):
+    if prompt := st.chat_input("Ask me about stocks, portfolio, SIPs, or document content..."):
         logger.info(f"Processing user prompt: {prompt}")
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):

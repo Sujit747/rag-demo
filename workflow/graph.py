@@ -9,6 +9,10 @@ from dataclasses import asdict
 from datetime import datetime
 import json
 import re
+import logging
+from tools.document_rag import DocumentRAGTool
+
+logger = logging.getLogger(__name__)
 
 class AgentState(TypedDict):
     messages: List[str]
@@ -24,6 +28,7 @@ class FinancialWorkflowGraph:
         self.llm = llm
         self.db_manager = db_manager
         self.tool_node = ToolNode(tools)
+        self.rag_tool = DocumentRAGTool()
         self.workflow = StateGraph(AgentState)
         self._build_graph()
     
@@ -91,100 +96,107 @@ class FinancialWorkflowGraph:
         last_message = state["messages"][-1] if state["messages"] else ""
         tool_results = {}
         
-        symbol_mapping = {
-            'RELIANCE': 'RELIANCE.NS', 'TCS': 'TCS.NS', 'HDFC': 'HDFCBANK.NS',
-            'HDFCBANK': 'HDFCBANK.NS', 'INFY': 'INFY.NS', 'INFOSYS': 'INFY.NS',
-            'ICICIBANK': 'ICICIBANK.NS', 'ICICI': 'ICICIBANK.NS', 'SBIN': 'SBIN.NS',
-            'SBI': 'SBIN.NS', 'ITC': 'ITC.NS', 'WIPRO': 'WIPRO.NS', 'LT': 'LT.NS',
-            'LARSEN': 'LT.NS', 'HCLTECH': 'HCLTECH.NS', 'HCL': 'HCLTECH.NS',
-            'BAJFINANCE': 'BAJFINANCE.NS', 'BAJAJ': 'BAJFINANCE.NS',
-            'MARUTI': 'MARUTI.NS', 'ASIANPAINT': 'ASIANPAINT.NS', 'ASIAN': 'ASIANPAINT.NS'
-        }
-        
-        try:
-            if intent == "stock_lookup":
-                words = [''.join(c for c in word if c.isalnum()).upper() for word in last_message.split()]
-                candidates = []
-                for word in words:
-                    if word in symbol_mapping or word.endswith(('.NS', '.BO')) or (len(word) <= 10 and word.isalpha()):
-                        candidates.append(word)
+        # Try RAG first
+        rag_response = self.rag_tool._run(last_message)
+        logger.debug(f"RAG response for '{last_message}': {rag_response}")
+        if rag_response != "unanswerable":
+            tool_results["rag_response"] = rag_response
+        else:
+            # Fallback to existing tools
+            symbol_mapping = {
+                'RELIANCE': 'RELIANCE.NS', 'TCS': 'TCS.NS', 'HDFC': 'HDFCBANK.NS',
+                'HDFCBANK': 'HDFCBANK.NS', 'INFY': 'INFY.NS', 'INFOSYS': 'INFY.NS',
+                'ICICIBANK': 'ICICIBANK.NS', 'ICICI': 'ICICIBANK.NS', 'SBIN': 'SBIN.NS',
+                'SBI': 'SBIN.NS', 'ITC': 'ITC.NS', 'WIPRO': 'WIPRO.NS', 'LT': 'LT.NS',
+                'LARSEN': 'LT.NS', 'HCLTECH': 'HCLTECH.NS', 'HCL': 'HCLTECH.NS',
+                'BAJFINANCE': 'BAJFINANCE.NS', 'BAJAJ': 'BAJFINANCE.NS',
+                'MARUTI': 'MARUTI.NS', 'ASIANPAINT': 'ASIANPAINT.NS', 'ASIAN': 'ASIANPAINT.NS'
+            }
+            
+            try:
+                if intent == "stock_lookup":
+                    words = [''.join(c for c in word if c.isalnum()).upper() for word in last_message.split()]
+                    candidates = []
+                    for word in words:
+                        if word in symbol_mapping or word.endswith(('.NS', '.BO')) or (len(word) <= 10 and word.isalpha()):
+                            candidates.append(word)
+                    
+                    symbol = None
+                    for word in candidates:
+                        if word in symbol_mapping:
+                            symbol = word
+                            break
+                        elif word.endswith(('.NS', '.BO')):
+                            symbol = word
+                            break
+                    if not symbol and candidates:
+                        symbol = candidates[-1]
+                    
+                    if symbol:
+                        result = self.tools["stock_price_lookup"]._run(symbol)
+                        tool_results["stock_data"] = result
+                    else:
+                        tool_results["stock_data"] = "Please specify a valid stock symbol (e.g., RELIANCE, TCS)."
                 
-                symbol = None
-                for word in candidates:
-                    if word in symbol_mapping:
-                        symbol = word
-                        break
-                    elif word.endswith(('.NS', '.BO')):
-                        symbol = word
-                        break
-                if not symbol and candidates:
-                    symbol = candidates[-1]
+                elif intent == "portfolio_analysis":
+                    result = self.tools["portfolio_analysis"]._run(state["user_id"])
+                    tool_results["portfolio_analysis"] = result
                 
-                if symbol:
-                    result = self.tools["stock_price_lookup"]._run(symbol)
-                    tool_results["stock_data"] = result
+                elif intent == "sip_reminder":
+                    result = self.tools["sip_reminder_check"]._run(state["user_id"])
+                    tool_results["sip_reminders"] = result
+                
+                elif intent == "add_portfolio_shares":
+                    words = [''.join(c for c in word if c.isalnum()).upper() for word in last_message.split()]
+                    symbol = None
+                    quantity = None
+                    candidates = []
+                    for word in words:
+                        if word in symbol_mapping or word.endswith(('.NS', '.BO')) or (len(word) <= 10 and word.isalpha()):
+                            candidates.append(word)
+                        try:
+                            qty = float(word)
+                            if qty > 0:
+                                quantity = qty
+                        except:
+                            pass
+                
+                    for word in candidates:
+                        if word in symbol_mapping:
+                            symbol = word
+                            break
+                        elif word.endswith(('.NS', '.BO')):
+                            symbol = word
+                            break
+                    if not symbol and candidates:
+                        symbol = candidates[-1]
+                    
+                    if symbol and quantity:
+                        result = self.tools["add_portfolio_shares"]._run(state["user_id"], symbol, quantity)
+                        tool_results["add_shares"] = result
+                    else:
+                        tool_results["add_shares"] = "Please specify a valid stock symbol and quantity (e.g., 'Add 10 RELIANCE shares')."
+                
+                elif intent == "set_sip_reminder":
+                    amount_match = re.search(r'₹?\s*(\d+\.?\d*)', last_message)
+                    day_match = re.search(r'(\d{1,2})(?:th|st|nd|rd)', last_message)
+                    fund_name = None
+                    for word in last_message.split():
+                        if word.upper() not in ['SET', 'SIP', 'FOR', 'ON', 'REMINDER'] and not word.isdigit() and not word.startswith('₹'):
+                            fund_name = word if not fund_name else f"{fund_name} {word}"
+                    amount = float(amount_match.group(1)) if amount_match else None
+                    due_day = int(day_match.group(1)) if day_match else None
+                    if fund_name and amount and due_day:
+                        result = self.tools["set_sip_reminder"]._run(state["user_id"], fund_name, amount, due_day)
+                        tool_results["set_sip"] = result
+                    else:
+                        tool_results["set_sip"] = "Please specify fund name, amount, and due day (e.g., 'Set ₹5000 SIP for HDFC Fund on 15th')."
+                
                 else:
-                    tool_results["stock_data"] = "Please specify a valid stock symbol (e.g., RELIANCE, TCS)."
+                    tool_results["general"] = "I can help with stock lookups, portfolio analysis, SIP reminders, adding shares, or setting SIPs. What would you like to do?"
             
-            elif intent == "portfolio_analysis":
-                result = self.tools["portfolio_analysis"]._run(state["user_id"])
-                tool_results["portfolio_analysis"] = result
-            
-            elif intent == "sip_reminder":
-                result = self.tools["sip_reminder_check"]._run(state["user_id"])
-                tool_results["sip_reminders"] = result
-            
-            elif intent == "add_portfolio_shares":
-                words = [''.join(c for c in word if c.isalnum()).upper() for word in last_message.split()]
-                symbol = None
-                quantity = None
-                candidates = []
-                for word in words:
-                    if word in symbol_mapping or word.endswith(('.NS', '.BO')) or (len(word) <= 10 and word.isalpha()):
-                        candidates.append(word)
-                    try:
-                        qty = float(word)
-                        if qty > 0:
-                            quantity = qty
-                    except:
-                        pass
-                
-                for word in candidates:
-                    if word in symbol_mapping:
-                        symbol = word
-                        break
-                    elif word.endswith(('.NS', '.BO')):
-                        symbol = word
-                        break
-                if not symbol and candidates:
-                    symbol = candidates[-1]
-                
-                if symbol and quantity:
-                    result = self.tools["add_portfolio_shares"]._run(state["user_id"], symbol, quantity)
-                    tool_results["add_shares"] = result
-                else:
-                    tool_results["add_shares"] = "Please specify a valid stock symbol and quantity (e.g., 'Add 10 RELIANCE shares')."
-            
-            elif intent == "set_sip_reminder":
-                amount_match = re.search(r'₹?\s*(\d+\.?\d*)', last_message)
-                day_match = re.search(r'(\d{1,2})(?:th|st|nd|rd)', last_message)
-                fund_name = None
-                for word in last_message.split():
-                    if word.upper() not in ['SET', 'SIP', 'FOR', 'ON', 'REMINDER'] and not word.isdigit() and not word.startswith('₹'):
-                        fund_name = word if not fund_name else f"{fund_name} {word}"
-                amount = float(amount_match.group(1)) if amount_match else None
-                due_day = int(day_match.group(1)) if day_match else None
-                if fund_name and amount and due_day:
-                    result = self.tools["set_sip_reminder"]._run(state["user_id"], fund_name, amount, due_day)
-                    tool_results["set_sip"] = result
-                else:
-                    tool_results["set_sip"] = "Please specify fund name, amount, and due day (e.g., 'Set ₹5000 SIP for HDFC Fund on 15th')."
-            
-            else:
-                tool_results["general"] = "I can help with stock lookups, portfolio analysis, SIP reminders, adding shares, or setting SIPs. What would you like to do?"
-        
-        except Exception as e:
-            tool_results["error"] = f"Error executing task: {str(e)}"
+            except Exception as e:
+                tool_results["error"] = f"Error executing task: {str(e)}"
         
         return {
             **state,
@@ -200,7 +212,7 @@ class FinancialWorkflowGraph:
         User Message: "{last_message}"
         User Profile: Risk Tolerance: {user_profile.get('risk_tolerance', 'Unknown')}, Goals: {user_profile.get('investment_goals', [])}
         Tool Results: {json.dumps(tool_results, indent=2)}
-        For portfolio analysis or adding shares, include the full tool output before adding advice. For SIPs, confirm the action or list reminders. Keep it conversational and under 200 words.
+        For portfolio analysis or adding shares, include the full tool output before adding advice. For SIPs, confirm the action or list reminders. If a RAG response is available, use it and note '📄 From Document'. Keep it conversational and under 200 words.
         """
         response = self.llm.invoke(response_prompt)
         return {
