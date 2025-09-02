@@ -8,3 +8,4 @@ tools/__pycache__
 workflow/__pycache__
 data/
 tests/
+document_rag.py
