@@ -99,10 +99,12 @@ class FinancialWorkflowGraph:
         # Try RAG first
         rag_response = self.rag_tool._run(last_message)
         logger.debug(f"RAG response for '{last_message}': {rag_response}")
-        if rag_response != "unanswerable":
+        
+        # Only add rag_response if it's actually answerable
+        if rag_response != "unanswerable" and not rag_response.startswith("❌") and not rag_response.startswith("⚠️"):
             tool_results["rag_response"] = rag_response
         else:
-            # Fallback to existing tools
+            # Fallback to existing tools only when RAG cannot answer
             symbol_mapping = {
                 'RELIANCE': 'RELIANCE.NS', 'TCS': 'TCS.NS', 'HDFC': 'HDFCBANK.NS',
                 'HDFCBANK': 'HDFCBANK.NS', 'INFY': 'INFY.NS', 'INFOSYS': 'INFY.NS',
@@ -207,13 +209,27 @@ class FinancialWorkflowGraph:
         user_profile = state["context"].get("user_profile", {})
         tool_results = state["tool_results"]
         last_message = state["messages"][-1] if state["messages"] else ""
+        
+        # Check if we have a valid RAG response
+        has_rag_response = "rag_response" in tool_results
+        
         response_prompt = f"""
         You are a helpful financial assistant. Generate a personalized response based on:
         User Message: "{last_message}"
         User Profile: Risk Tolerance: {user_profile.get('risk_tolerance', 'Unknown')}, Goals: {user_profile.get('investment_goals', [])}
         Tool Results: {json.dumps(tool_results, indent=2)}
-        For portfolio analysis or adding shares, include the full tool output before adding advice. For SIPs, confirm the action or list reminders. If a RAG response is available, use it and note '📄 From Document'. Keep it conversational and under 200 words.
+        
+        IMPORTANT INSTRUCTIONS:
+        - If tool_results contains 'rag_response', this means the answer came from the uploaded document. 
+        Use this as the primary answer and append '[This answer is from the document.]' at the end.
+        - If tool_results does NOT contain 'rag_response', this means the answer came from other tools (stock_data, portfolio_analysis, etc.).
+        Use those results and append '[This answer is not in the document.]' at the end.
+        
+        For portfolio analysis or adding shares, include the full tool output before adding advice. 
+        For SIPs, confirm the action or list reminders. 
+        Keep it conversational and under 200 words.
         """
+        
         response = self.llm.invoke(response_prompt)
         return {
             **state,
