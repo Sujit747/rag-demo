@@ -8,4 +8,5 @@ tools/__pycache__
 workflow/__pycache__
 data/
 tests/
-document_rag.py
+# document_rag.py
+test_openai.py
