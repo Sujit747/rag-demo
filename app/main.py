@@ -54,34 +54,69 @@ def main():
         page_icon="💰",
         layout="wide"
     )
-    st.title("🤖 Financial Assistant Demo - FAISS Edition")
-    st.subheader("Powered by LangChain + LangGraph + LlamaIndex + FAISS")
 
+    # Inject custom CSS for animations and logo-text styling
+    st.markdown("""
+        <style>
+            /* Fade-in animation for title */
+            .main-title {
+                animation: fadeIn 1.5s ease-in-out;
+            }
+            @keyframes fadeIn {
+                0% { opacity: 0; transform: translateY(-20px); }
+                100% { opacity: 1; transform: translateY(0); }
+            }
+
+            /* Sidebar logo and text container */
+            .logo-text-container {
+                display: flex;
+                align-items: center;
+                margin-bottom: 20px;
+            }
+            .logo-text {
+                font-size: 24px;
+                font-weight: bold;
+                color: #4CAF50;
+                margin-left: 10px;
+                animation: textPop 1s ease-in-out;
+            }
+            @keyframes textPop {
+                0% { opacity: 0; transform: scale(0.8); }
+                100% { opacity: 1; transform: scale(1); }
+            }
+
+            /* Sidebar elements slide-in animation */
+            .sidebar .sidebar-content > div {
+                animation: slideIn 0.5s ease-in-out;
+            }
+            @keyframes slideIn {
+                0% { opacity: 0; transform: translateX(-20px); }
+                100% { opacity: 1; transform: translateX(0); }
+            }
+
+            /* Chat message animation */
+            .stChatMessage {
+                animation: messagePop 0.5s ease-in-out;
+            }
+            @keyframes messagePop {
+                0% { opacity: 0; transform: scale(0.9); }
+                100% { opacity: 1; transform: scale(1); }
+            }
+        </style>
+    """, unsafe_allow_html=True)
+
+    # Display local JPEG logo and "Infinity Pool" text in sidebar
     with st.sidebar:
+        st.markdown('<div class="logo-text-container">', unsafe_allow_html=True)
+        st.image("images/logo.jpeg", width=90)  # Replace with actual path to your JPEG
+        st.markdown('<span class="logo-text">Infinity Pool</span>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
         st.header("⚙️ Configuration")
         user_id = st.text_input(
             "User ID",
             value="demo_user_123",
             help="Unique identifier for user sessions"
         )
-        st.markdown("---")
-        st.markdown("### 🔧 Framework Stack")
-        st.markdown("- **LangChain**: Agent & tool orchestration")
-        st.markdown("- **LangGraph**: Multi-step workflow management")
-        st.markdown("- **LlamaIndex**: Context & memory management")
-        st.markdown("- **FAISS**: High-performance vector similarity search")
-        st.markdown("- **yFinance**: Real financial data")
-        st.markdown("- **RAG**: Document-based Q&A")
-        st.markdown("---")
-        st.markdown("### 🎯 Demo Features")
-        st.markdown("- Stock price lookup")
-        st.markdown("- Portfolio analysis")
-        st.markdown("- SIP reminders")
-        st.markdown("- Add portfolio shares")
-        st.markdown("- Set SIP reminders")
-        st.markdown("- Long-term memory with FAISS")
-        st.markdown("- Document Q&A with RAG")
-        st.markdown("---")
         
         if 'assistant' in st.session_state:
             st.markdown("### 📊 FAISS Memory Stats")
@@ -100,12 +135,9 @@ def main():
         if uploaded_file:
             success, message = rag_tool.handle_file_upload(uploaded_file)
             st.text(message)
-        
-        st.markdown("---")
-        st.markdown("### 📜 Debug Log")
-        if os.path.exists('financial_assistant.log'):
-            with open('financial_assistant.log', 'r') as f:
-                st.text_area("Recent Logs", f.read(), height=200)
+
+    st.markdown('<h1 class="main-title">🤖 Financial Assistant Demo - FAISS Edition</h1>', unsafe_allow_html=True)
+    st.subheader("Powered by LangChain + LangGraph + LlamaIndex + FAISS")
 
     if 'assistant' not in st.session_state:
         try:
@@ -172,51 +204,6 @@ def main():
                     logger.error(f"Error processing prompt: {error_msg}", exc_info=True)
                     st.error(error_msg)
                     st.session_state.messages.append({"role": "assistant", "content": error_msg})
-
-    st.markdown("---")
-    st.markdown("### 💡 Try These Examples:")
-    col1, col2, col3, col4, col5 = st.columns(5)
-    with col1:
-        if st.button("📈 Get RELIANCE price"):
-            example_query = "What's the current price of RELIANCE stock?"
-            st.session_state.messages.append({"role": "user", "content": example_query})
-            st.rerun()
-    with col2:
-        if st.button("📊 Analyze portfolio"):
-            example_query = "Can you analyze my portfolio performance?"
-            st.session_state.messages.append({"role": "user", "content": example_query})
-            st.rerun()
-    with col3:
-        if st.button("🔔 Check SIPs"):
-            example_query = "Do I have any SIP payments due?"
-            st.session_state.messages.append({"role": "user", "content": example_query})
-            st.rerun()
-    with col4:
-        if st.button("➕ Add shares"):
-            example_query = "Add 10 RELIANCE shares to my portfolio"
-            st.session_state.messages.append({"role": "user", "content": example_query})
-            st.rerun()
-    with col5:
-        if st.button("⏰ Set SIP"):
-            example_query = "Set ₹5000 SIP for HDFC Fund on 15th"
-            st.session_state.messages.append({"role": "user", "content": example_query})
-            st.rerun()
-
-    st.markdown("---")
-    st.markdown("### 🧠 FAISS Memory Features:")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🔍 Query Memory"):
-            example_query = "What did we discuss about my investment preferences?"
-            st.session_state.messages.append({"role": "user", "content": example_query})
-            st.rerun()
-    with col2:
-        if st.button("📈 Memory Context"):
-            if 'assistant' in st.session_state:
-                context = st.session_state.assistant.get_user_insights(user_id)
-                st.info(f"User Context:\n{context}")
-            else:
-                st.warning("Assistant not initialized yet")
 
 if __name__ == "__main__":
     main()
